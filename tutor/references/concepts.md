@@ -4,6 +4,124 @@ Personal glossary of concepts explained during tutoring sessions, in plain langu
 
 ---
 
+## Phase 2 — Backend
+
+### FastAPI + Uvicorn + uv — who does what
+- **FastAPI**: a Python library for *defining* API endpoints (routes, request/response shapes). It does not run a server itself.
+- **Uvicorn**: the actual server process that runs your FastAPI code and listens for real HTTP requests — same relationship as React needing a browser to execute it. FastAPI = the "what," Uvicorn = "what runs it."
+- **uv**: a fast, modern all-in-one tool for Python projects — `uv init` scaffolds `pyproject.toml` (Python's `package.json` equivalent), `uv add <pkg>` installs + records a dependency (and creates an isolated `.venv` so packages don't clash with the rest of the machine), `uv run <cmd>` runs a command inside that isolated environment without manually "activating" it.
+- `@app.get("/")` is a decorator — "when a GET request hits `/`, run this function and return its result."
+- `/docs` — FastAPI auto-generates an interactive API documentation page (OpenAPI spec) from your code, for free.
+- 🏭 Production lens: `/docs`/OpenAPI isn't a toy — real teams use it directly, often to auto-generate client SDKs or feed API gateways. Not a simplification.
+
+### Redis + arq — what a "queue" physically is, and how the worker finds new jobs
+- Redis is just a very fast in-memory data store — it doesn't know what "a job" is on its own. `arq` is the Python convention/library that uses Redis specifically as a job queue: it defines how "run function X with these arguments" gets stored as data, and provides the enqueue/dequeue logic so neither side has to hand-roll it.
+- **The actual mechanism is polling, not a push notification** — worth being precise here since it's easy to assume otherwise. `enqueue_job` stores the job at a key and adds its ID into a Redis **sorted set**, scored by the time it should run (usually "now," but this scoring is also what enables arq's delayed/cron job support). The worker loop asks Redis "give me everything due ≤ now," and if there's nothing, waits a short fixed interval (~0.5s) before asking again.
+- Redis does have true push-capable primitives (`BLPOP`, Pub/Sub) but they only give strict FIFO delivery, which can't express "only what's due now" — the sorted-set + fast-poll design trades a true instant push for that scheduling flexibility. In practice sub-second polling feels instant for anything but very fast tasks.
+- **`WorkerSettings.functions = [process_research]` is an allow-list**, and it's read *externally*, not called from within `worker.py` itself. Running `arq worker.WorkerSettings` on the command line makes arq's CLI import the `worker` module and `getattr(module, "WorkerSettings")` — a plain lookup-by-name, not a function call. Internally it then reads `.functions` (what it's allowed to run) and `.redis_settings` (which Redis to connect to) off that class. If a job requests a function name not in that list, the worker rejects it.
+- `_job_id=job_id` when enqueueing forces arq to use *our* generated ID instead of a random one it would otherwise assign — needed so the ID we return to the API caller is the same one we look up later via `Job(job_id, redis)`.
+- `job.status()` (queued/running/complete/not_found) and `job.result_info()` (non-blocking — returns immediately, `None` if not finished) are how `GET /research/{job_id}` checks in on a job without ever blocking the request while waiting.
+
+### Block diagram — API, Redis, and Worker interaction
+
+**Important precision before reading this diagram:** arq is not a separate running process — it doesn't get its own lane. It's a Python library loaded *inside* both the API process and the Worker process; it's the code doing the actual Redis-talking on each side. Every `arq.___` label below marks code from that library running inside whichever process it's attached to, not a fourth independent actor.
+
+```mermaid
+sequenceDiagram
+    participant API as FastAPI (backend/api)<br/>uses arq client code
+    participant Redis as Redis
+    participant Worker as Worker process (backend/worker)<br/>runs arq's Worker loop
+
+    Note over API,Redis: 1. Submitting a job
+    API->>Redis: [via arq.enqueue_job()]<br/>enqueue_job("process_research", job_id, tickers, _job_id=job_id)
+    Note over Redis: stores job data + adds job_id to a sorted set,<br/>scored by "run at" time (now, for us)
+
+    loop every ~0.5s (arq's poll_delay, running inside Worker)
+        Worker->>Redis: [via arq's Worker poll loop]<br/>"any jobs due <= now?"
+        Redis-->>Worker: (nothing yet)
+    end
+
+    Note over Worker: eventually finds the job (still arq's poll loop)
+    Worker->>Redis: [via arq] claim the due job
+    Redis-->>Worker: job_id, tickers
+
+    Note over Worker: arq calls OUR code here:<br/>process_research(ctx, job_id, tickers)<br/>(the 3s fake delay happens inside the worker process —<br/>not in Redis, and not in the API)
+
+    Worker->>Redis: [via arq] store result (status=complete, return value)
+
+    Note over API,Redis: 2. Checking status (this is what the frontend's polling calls)
+    API->>Redis: [via arq.jobs.Job(...)]<br/>Job(job_id, redis).status() / .result_info()
+    Redis-->>API: status + result (once complete)
+```
+
+- arq appears in **both** lanes because it's imported and used by both processes — as a client (enqueue + status-check) in the API, and as the actual worker/poll-loop engine in the Worker process. Same library, two different roles depending on which process is using it.
+- The one thing that's genuinely *ours*, not arq's: `process_research` itself — arq's job is purely to get that function called with the right arguments at the right time; what happens inside it is entirely our own code.
+- The API and the worker never talk to each other directly — every arrow touches Redis, never crosses API↔Worker. That's the decoupling benefit from earlier: neither process needs to know the other exists, when it started, or where it's running.
+- The `loop` box is the polling mechanism from above, made visual — most iterations find nothing, which is normal and cheap.
+
+### CORS — why the browser blocks cross-origin API calls by default
+- The concrete risk: cookies are attached by the browser based on *which domain* is being called, not *which page* initiated the call. So if you're logged into a real site and a malicious page is open in another tab, that malicious page's JS can call the real site's API and the browser will still attach your real session cookie — making it look like a legitimate request from you.
+- CORS's specific job: even though the request may still reach the server, the browser blocks the malicious page's JS from **reading the response** unless the server's `Access-Control-Allow-Origin` header explicitly names that origin. (Precision note: CORS mainly protects response confidentiality — preventing the request's *side effects* from happening at all is a different, complementary defense, CSRF tokens, not CORS's job.)
+- Diagram — genuine origin (allowed) vs. malicious origin (blocked), same API, same valid cookie in both cases; the only difference is which origin sent the request:
+
+```
+mybank.com (Genuine JS)          Browser (CORS Enforcer)              mybank.com API
+     |                               |                                      |
+     |-- 1. fetch(mybank/balance) -->|                                      |
+     |                               |-- 2. Request + Cookie -------------->|
+     |                               |                                      | (Cookie valid)
+     |                               |                                      | (Fetches balance)
+     |                               |<- 3. Data: $500 ---------------------|
+     |                               |      Headers:                        |
+     |                               |      Allow-Origin: mybank.com        |
+     |                               |                                      |
+     |                               | [CORS Check: Initiator=mybank.com]   |
+     |                               | [         Allow-Origin=mybank.com]   |
+     |                               | [MATCH: PASS]                        |
+     |                               |                                      |
+     |<-- 4. Response ($500) --------|                                      |
+     |                               |                                      |
+ (Balance is displayed)
+
+
+------------------------------------------------------------------------------------------
+
+
+evil.com (Malicious JS)          Browser (CORS Enforcer)              mybank.com API
+     |                               |                                      |
+     |-- 1. fetch(mybank/balance) -->|                                      |
+     |                               |-- 2. Request + Cookie -------------->|
+     |                               |                                      | (Cookie valid)
+     |                               |                                      | (Fetches balance)
+     |                               |<- 3. Data: $500 ---------------------|
+     |                               |      Headers:                        |
+     |                               |      Allow-Origin: mybank.com        |
+     |                               |                                      |
+     |                               | [CORS Check: Initiator=evil.com  ]   |
+     |                               | [         Allow-Origin=mybank.com]   |
+     |                               | [MISMATCH: BLOCK RESPONSE]           |
+     |                               |                                      |
+     |<-- 4. CORS Error -------------|                                      |
+     |    (Data discarded)           |                                      |
+     |                               |                                      |
+  (Cannot read $500)
+```
+
+- Where we stand today: no login/sessions exist yet in this project, so there's no real sensitive data at stake right now — but the browser enforces this unconditionally for every site regardless of whether *this specific app* currently has anything sensitive, since it can't know that in advance. `allow_origins=["http://localhost:5173"]` is required just to let our own frontend talk to our own backend; it'll become genuinely load-bearing once Phase 7 adds real auth/sessions.
+
+### arq/Redis → Azure Service Bus — what changed and why
+- Not just a config swap — a different SDK, different mental model. arq hid the receive loop and let you register named functions (`WorkerSettings.functions`); Service Bus has no such convenience. We write the receive loop ourselves (`async for msg in receiver:`), and messages are just plain JSON we design ourselves (`{"job_id", "tickers"}`).
+- **Explicit acknowledgment is now visible, not hidden**: `receiver.complete_message(msg)` must be called after successfully processing, or Service Bus redelivers the message once its lock (1 minute, set at queue creation) expires. This is the same "at-least-once delivery" idea arq/Redis had, just no longer abstracted away — we now see and control the exact moment a message is considered "done."
+- Least-privilege access: created two separate SAS policies on the queue (`send-only` for the API, `listen-only` for the worker) instead of handing both the full-manage root key — same trust-boundary principle as the CORS/VNet discussions earlier, applied to the queue.
+- Verified in isolation before wiring into the real app: sent a message via a throwaway script, confirmed it actually landed using `az servicebus queue show`'s message count (not just "no errors") — same "prove the new piece works standalone" discipline as arq/Redis originally.
+- 🏭 Real gotcha caught in testing, not just a lesson: Python buffers `print()` output when not attached to a terminal — exactly the situation inside a container. Output still happens, just delayed/batched in logs. Fixed with `ENV PYTHONUNBUFFERED=1` in the worker's Dockerfile — otherwise live container logs would appear to lag behind reality once deployed.
+
+### Frontend ↔ real backend integration
+- Replaced the fake `setTimeout` flow with a real `fetch(..., { method: 'POST' })` to `/research`, then a `setInterval`-based `pollStatus` that calls `GET /research/{job_id}` every second until `data.status === 'done'`, then `clearInterval` to stop — same polling concept discussed abstractly earlier ("who changes state to done"), now doing real work.
+- Known simplification, flagged for later: the backend URL (`http://localhost:8000`) is hardcoded in the frontend right now. Needs to become a configurable value (env var) before deploying, since production will have a real Container Apps URL, not localhost.
+
+---
+
 ## Phase 1 — Frontend
 
 ### Why React at all (vs. plain HTML/CSS/JS)

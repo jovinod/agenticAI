@@ -1,0 +1,11 @@
+[project]
+name = "alpha-worker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "azure-servicebus>=7.14.3",
+    "psycopg[binary]>=3.3.4",
+    "sqlmodel>=0.0.39",
+]

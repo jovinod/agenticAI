@@ -10,12 +10,12 @@ the way.
 
 ## Status
 
-**Phase 1 — Frontend shell.** Local build complete, not yet deployed.
+**Phase 1 — Frontend shell: complete.** Deployed and verified live on Azure Static Web Apps. Next: Phase 2 — backend skeleton (FastAPI + queue + Postgres).
 
 ## Architecture
 
 ```
-Web page (React SPA, Azure Static Web Apps)        ← 🚧 built locally, not deployed yet
+Web page (React SPA, Azure Static Web Apps)        ← ✅ live
    │ (JWT/API key auth)                             ← not built yet
    ▼
 FastAPI (Container App, autoscale on HTTP)          ← not built yet
@@ -34,7 +34,7 @@ Worker (Container App, autoscale on queue depth)    ← not built yet
 
 ## Live URLs
 
-None yet — first deploy (Azure Static Web Apps) is the next step.
+- Frontend: https://nice-water-0e7781500.7.azurestaticapps.net/ (Azure Static Web Apps, `alpha-rg`, East Asia)
 
 ## What's working right now
 

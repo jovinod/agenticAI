@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import './App.css'
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
 function App() {
   const [tickerInput, setTickerInput] = useState('')
   const [tickers, setTickers] = useState([])
@@ -8,7 +10,7 @@ function App() {
   const [status, setStatus] = useState('idle') // 'idle' | 'loading' | 'done'
   const [report, setReport] = useState(null)
 
-  function handleSubmit() {
+  async function handleSubmit() {
     const parsed = tickerInput
       .split(',')
       .map((t) => t.trim().toUpperCase())
@@ -29,14 +31,27 @@ function App() {
     setTickers(parsed)
     setStatus('loading')
 
-    const jobId = crypto.randomUUID()
-    setTimeout(() => {
-      setReport({
-        jobId,
-        summary: parsed.map((t) => `${t}: looks solid, no major red flags.`),
-      })
-      setStatus('done')
-    }, 2000)
+    const response = await fetch(`${API_URL}/research`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tickers: parsed }),
+    })
+    const { job_id } = await response.json()
+
+    pollStatus(job_id)
+  }
+
+  function pollStatus(jobId) {
+    const interval = setInterval(async () => {
+      const response = await fetch(`${API_URL}/research/${jobId}`)
+      const data = await response.json()
+
+      if (data.status === 'done') {
+        clearInterval(interval)
+        setReport(data.result)
+        setStatus('done')
+      }
+    }, 1000)
   }
 
   function handleReset() {
