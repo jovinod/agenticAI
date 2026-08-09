@@ -25,6 +25,11 @@ For each fork, options + trade-offs + default recommendation. Always re-check ag
 - **User-facing:** API key for simplest MVP; JWT if the user wants real login/session semantics later.
 - **Service-to-service (backend → Azure services):** Managed Identity — no secrets/keys in code or env files.
 
+## Human-in-the-loop (not built — documented for later)
+- Concept: a pause/approval gate before an agent takes a risky or irreversible action (payments, deletions, sending something on the user's behalf, etc.).
+- **Not needed for this app's current scope** — stock research is read-only; there's no risky action for anything to gate. Not a phase, not built.
+- Revisit if the app's scope ever grows to include an agent *acting* on the user's behalf (e.g. placing a trade), not just reporting.
+
 ## Local dev ports (machine-specific)
 - Redis: **`localhost:6380`**, not the standard 6379 — an unrelated container (`infra-redis-1`, different project) already holds 6379 on this machine. Discovered late: `alpha-redis` had silently failed to bind 6379 the whole time (requested vs. actual port bindings didn't match — `docker inspect`'s `NetworkSettings.Ports` was empty despite `HostConfig.PortBindings` looking correct), so the backend had actually been talking to `infra-redis-1` all along without erroring. Fixed by moving to 6380 and passing `RedisSettings(port=6380)` explicitly in both `backend/api/main.py` and `backend/worker/worker.py` instead of relying on the default. **Lesson: after any `docker run -p`, verify with `docker inspect <name> --format '{{json .NetworkSettings.Ports}}'` that the binding actually took — `docker ps`/`docker start` succeeding is not proof the port bound.**
 - Postgres: **`localhost:5433`**, not the standard 5432 — an unrelated container (`infra-postgres-1`, different project) already holds 5432 on this machine. Don't "fix" this to 5432 without checking that container is still there.
