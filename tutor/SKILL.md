@@ -57,6 +57,7 @@ The user wants **very simple, intuitive language** throughout — as if explaini
 - **Check `references/progress.md`** at the start of each session (create it if it doesn't exist) to see which phase/step the user is on. Don't restart from Phase 1 if they've already completed later phases.
 - **Update `references/progress.md`** as steps are completed — a simple checklist log with dates, so the user (or a future session) can see exactly where things stand.
 - **Update `references/concepts.md`** whenever a concept gets explained in real depth (a back-and-forth that lands on real understanding, not a one-line clarification) — keep entries short and grouped by phase/topic.
+- **Update the "Azure Deployment Topology" Mermaid diagram in `README.md`** whenever a new Azure resource is created, removed, or its connections/auth mechanism changes — this diagram uses real resource names (not conceptual boxes) and is meant to always reflect exactly what's actually deployed. Keep it in sync the same session the resource changes, not as a later cleanup pass.
 - **Read the user's actual code** before suggesting how to integrate the next piece — don't assume structure, inspect it.
 - Follow the phase order in `references/phases.md` unless the user wants to jump around — but flag if skipping a phase will cause problems later (e.g., building agents before the queue skeleton exists).
 

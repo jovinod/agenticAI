@@ -16,7 +16,7 @@ the way.
 
 ```
 Web page (React SPA, Azure Static Web Apps)        ← ✅ live
-   │ (JWT/API key auth)                             ← not built yet (Phase 7)
+   │ (JWT/API key auth)                             ← not built yet (Phase 8)
    ▼
 FastAPI (Container App, autoscale on HTTP)          ← ✅ live (alpha-api, external ingress)
    │  writes job → Azure Service Bus queue
@@ -29,7 +29,43 @@ Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, 
    │      ├─ loads Skills (reusable capability modules)   ← not built yet (Phase 5)
    │      └─ reads/writes Redis + Postgres                ← Postgres ✅ live; Redis not needed yet (Phase 5)
    │
-   └─▶ App Insights / OpenTelemetry                 ← not built yet (Phase 8)
+   └─▶ App Insights / OpenTelemetry                 ← not built yet (Phase 10)
+```
+
+This first diagram is the conceptual/application view (matches `phases.md`'s target). Below is a
+second, literal view — actual Azure resource names and how they really connect, updated every
+phase as real infrastructure gets added. This is the one to check if you want to know "what's
+actually deployed right now," rather than "what's the app logically made of."
+
+## Azure Deployment Topology (real resource names — updated every phase)
+
+```mermaid
+flowchart TD
+    User(["Visitor's browser"])
+
+    subgraph SWA["Static Web App: alpha  (East Asia)"]
+        Frontend["React SPA (built files)"]
+    end
+
+    subgraph RG["Resource Group: alpha-rg  (Central India unless noted)"]
+        subgraph ENV["Container Apps Environment: alpha-env"]
+            API["Container App: alpha-api\n(external ingress, port 8000)"]
+            Worker["Container App: alpha-worker\n(no ingress, min 1 replica)"]
+        end
+        ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
+        SB["Service Bus Namespace: alpharesearchsb\nqueue: research-jobs"]
+        PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha")]
+        LAW["Log Analytics workspace:\nworkspace-alphargK2N9\n(auto-created by alpha-env)"]
+    end
+
+    User -->|HTTPS| Frontend
+    Frontend -->|"HTTPS (VITE_API_URL, baked in at build)"| API
+    API -->|"send (send-only key)"| SB
+    SB -->|"listen (listen-only key)"| Worker
+    API -->|"read/write (admin user+pass)"| PG
+    Worker -->|"read/write (admin user+pass)"| PG
+    ENV -.->|pulls images| ACR
+    ENV -.->|logs/metrics| LAW
 ```
 
 ## Live URLs
