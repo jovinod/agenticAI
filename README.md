@@ -27,7 +27,7 @@ Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, 
    │      ├─ calls Azure AI Foundry (model + tracing)    ← not built yet (Phase 4)
    │      ├─ calls MCP tools (stock data, news)           ← not built yet (Phase 3)
    │      ├─ loads Skills (reusable capability modules)   ← not built yet (Phase 5)
-   │      └─ reads/writes Redis + Postgres                ← Postgres ✅ live; Redis not needed yet (Phase 5)
+   │      └─ reads/writes Redis + Postgres                ← both ✅ live (Redis currently just a per-ticker result cache, pulled forward from Phase 5; agent memory use still Phase 5)
    │
    └─▶ App Insights / OpenTelemetry                 ← not built yet (Phase 10)
 ```
@@ -55,6 +55,7 @@ flowchart TD
         ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
         SB["Service Bus Namespace: alpharesearchsb\nqueue: research-jobs"]
         PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha")]
+        Redis[("Managed Redis:\nalpha-research-cache\nport 10000, TLS, key auth")]
         LAW["Log Analytics workspace:\nworkspace-alphargK2N9\n(auto-created by alpha-env)"]
     end
 
@@ -64,6 +65,8 @@ flowchart TD
     SB -->|"listen (listen-only key)"| Worker
     API -->|"read/write (admin user+pass)"| PG
     Worker -->|"read/write (admin user+pass)"| PG
+    API -->|"cache check (read) — access key"| Redis
+    Worker -->|"cache write — access key"| Redis
     ENV -.->|pulls images| ACR
     ENV -.->|logs/metrics| LAW
 ```
@@ -76,8 +79,13 @@ flowchart TD
 ## What's working right now
 
 - Ticker input (comma-separated, multi-ticker), with format validation.
-- Real end-to-end flow: submit → real job queued via Azure Service Bus → real worker picks it up →
-  status written to Azure Database for PostgreSQL → frontend polls and shows the real result.
+- Real end-to-end flow: each ticker in a request fans out independently — submit → per-ticker cache
+  check (Azure Managed Redis) → cache hit returns instantly, cache miss queues via Azure Service Bus →
+  real worker picks it up → status written to Azure Database for PostgreSQL → frontend polls and
+  aggregates all tickers' results once every one is done.
+- A same-day repeat request for a ticker already computed returns instantly from cache, skipping the
+  queue entirely; a request mixing a cached ticker with a fresh one correctly returns the cached one
+  immediately while only the fresh one is computed.
 - Report content is still a stub (fixed "looks solid, no major red flags" text per ticker) — real data
   sourcing is Phase 3.
 
