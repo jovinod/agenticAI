@@ -6,6 +6,7 @@ from azure.servicebus.aio import ServiceBusClient
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from models import TickerJob
+from tools.stock_data import fetch_stock_data
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
@@ -35,7 +36,7 @@ def seconds_until_midnight():
     return int((midnight - now).total_seconds())
 
 
-async def process_ticker(job_id: str, ticker: str):
+async def process_ticker(job_id: str, ticker: str, market: str):
     with Session(engine) as session:
         task = session.exec(
             select(TickerJob).where(TickerJob.job_id == job_id, TickerJob.ticker == ticker)
@@ -44,17 +45,23 @@ async def process_ticker(job_id: str, ticker: str):
         session.add(task)
         session.commit()
 
-    print(f"Processing {ticker} for job {job_id}...")
-    await asyncio.sleep(3)  # fake delay — stands in for real agent work, later phases
+    print(f"Processing {ticker} ({market}) for job {job_id}...")
+    # Real data now — direct API call, no MCP/LLM involved (see tools/stock_data.py docstring).
+    data = fetch_stock_data(ticker, market)
+
+    if "error" in data:
+        summary_line = data["error"]
+    else:
+        summary_line = (
+            f"{ticker}: {data['currency']} {data['price']}, "
+            f"P/E {data['pe_ratio']}, 52w range {data['fifty_two_week_low']}-{data['fifty_two_week_high']}"
+        )
     print(f"{ticker} done.")
 
-    result = {
-        "tickers": [ticker],
-        "summary": [f"{ticker}: looks solid, no major red flags."],
-    }
+    result = {"tickers": [ticker], "summary": [summary_line]}
     result_json = json.dumps(result)
 
-    cache_key = f"research:{ticker}:{date.today().isoformat()}"
+    cache_key = f"research:{market}:{ticker}:{date.today().isoformat()}"
     await redis_client.set(cache_key, result_json, ex=seconds_until_midnight())
 
     with Session(engine) as session:
@@ -74,7 +81,7 @@ async def main():
             print("Worker started, waiting for messages...")
             async for msg in receiver:
                 data = json.loads(str(msg))
-                await process_ticker(data["job_id"], data["ticker"])
+                await process_ticker(data["job_id"], data["ticker"], data["market"])
                 await receiver.complete_message(msg)  # acknowledge — without this, Service Bus redelivers it
 
 

@@ -2,6 +2,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date
+from typing import Literal
 import json
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +64,7 @@ app.add_middleware(
 
 class ResearchRequest(BaseModel):
     tickers: list[str]
+    market: Literal["US", "India"]
 
 
 @app.get("/")
@@ -76,19 +78,21 @@ async def create_research(request: ResearchRequest):
     today = date.today().isoformat()
 
     for ticker in request.tickers:
-        cache_key = f"research:{ticker}:{today}"
+        cache_key = f"research:{request.market}:{ticker}:{today}"
         cached = await app.state.redis.get(cache_key)
 
         with Session(engine) as session:
             if cached:
-                task = TickerJob(job_id=job_id, ticker=ticker, status="done", result=cached)
+                task = TickerJob(
+                    job_id=job_id, ticker=ticker, market=request.market, status="done", result=cached
+                )
             else:
-                task = TickerJob(job_id=job_id, ticker=ticker, status="queued")
+                task = TickerJob(job_id=job_id, ticker=ticker, market=request.market, status="queued")
             session.add(task)
             session.commit()
 
         if not cached:
-            message_body = json.dumps({"job_id": job_id, "ticker": ticker})
+            message_body = json.dumps({"job_id": job_id, "ticker": ticker, "market": request.market})
             await app.state.servicebus_sender.send_messages(ServiceBusMessage(message_body))
 
     return {"job_id": job_id}

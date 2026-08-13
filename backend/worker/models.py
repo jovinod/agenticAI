@@ -10,6 +10,7 @@ class TickerJob(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     job_id: str = Field(index=True)
     ticker: str = Field(index=True)
+    market: str = "US"                        # "US" or "India" — user-selected, not auto-detected
     status: str = "queued"
     result: Optional[str] = None
     created_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)

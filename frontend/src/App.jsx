@@ -5,6 +5,7 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 function App() {
   const [tickerInput, setTickerInput] = useState('')
+  const [market, setMarket] = useState('US')
   const [tickers, setTickers] = useState([])
   const [error, setError] = useState('')
   const [status, setStatus] = useState('idle') // 'idle' | 'loading' | 'done'
@@ -31,25 +32,64 @@ function App() {
     setTickers(parsed)
     setStatus('loading')
 
-    const response = await fetch(`${API_URL}/research`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tickers: parsed }),
-    })
-    const { job_id } = await response.json()
-
-    pollStatus(job_id)
+    try {
+      const response = await fetch(`${API_URL}/research`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers: parsed, market }),
+      })
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}`)
+      }
+      const { job_id } = await response.json()
+      pollStatus(job_id)
+    } catch (err) {
+      setError('Could not reach the server. Check that the backend is running and try again.')
+      setStatus('idle')
+    }
   }
 
-  function pollStatus(jobId) {
-    const interval = setInterval(async () => {
-      const response = await fetch(`${API_URL}/research/${jobId}`)
-      const data = await response.json()
+  // Service Bus delivery can genuinely take up to ~60s sometimes (a known, logged
+  // quirk — see concepts.md) — this cap is for a truly unresponsive backend, not
+  // ordinary slowness, so it's set generously rather than tightly.
+  const MAX_POLL_ATTEMPTS = 120 // 1/sec => 2 minutes
 
-      if (data.status === 'done') {
+  function pollStatus(jobId) {
+    let attempts = 0
+
+    const interval = setInterval(async () => {
+      attempts += 1
+
+      try {
+        const response = await fetch(`${API_URL}/research/${jobId}`)
+        if (!response.ok) {
+          throw new Error(`Server returned ${response.status}`)
+        }
+        const data = await response.json()
+
+        if (data.status === 'done') {
+          clearInterval(interval)
+          setReport(data.result)
+          setStatus('done')
+          return
+        }
+        if (data.error) {
+          clearInterval(interval)
+          setError(`Something went wrong: ${data.error}`)
+          setStatus('idle')
+          return
+        }
+      } catch (err) {
         clearInterval(interval)
-        setReport(data.result)
-        setStatus('done')
+        setError('Lost connection to the server while waiting for results. Please try again.')
+        setStatus('idle')
+        return
+      }
+
+      if (attempts >= MAX_POLL_ATTEMPTS) {
+        clearInterval(interval)
+        setError('This is taking much longer than expected. Please try again.')
+        setStatus('idle')
       }
     }, 1000)
   }
@@ -67,9 +107,13 @@ function App() {
 
       {status === 'idle' && (
         <>
+          <select value={market} onChange={(e) => setMarket(e.target.value)}>
+            <option value="US">US market</option>
+            <option value="India">India market (NSE/BSE)</option>
+          </select>
           <input
             type="text"
-            placeholder="e.g. AAPL, TSLA"
+            placeholder={market === 'US' ? 'e.g. AAPL, TSLA' : 'e.g. RELIANCE, TCS'}
             value={tickerInput}
             onChange={(e) => setTickerInput(e.target.value)}
           />
