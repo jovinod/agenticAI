@@ -88,4 +88,5 @@ Deploy-prep work done this session:
 - Updated the Azure Deployment Topology diagram in `README.md` with the new Redis resource and its connections, per the established discipline of keeping it in sync same-session as infra changes.
 
 ## Open questions
-- None currently. Git init will be needed before the Phase 1 Azure Static Web Apps deploy step (typically deploys via GitHub Actions) — flagged for when we reach that point, not blocking local work now.
+- Git init was needed before the Phase 1 Azure Static Web Apps deploy step (typically deploys via GitHub Actions) — resolved, no longer relevant.
+- **Deferred deep-dive requested by user (2026-08-13):** full detail on TLS handshakes, public/private key exchange, and how trust is established between services (certificates, CA chains) — covered the basics/intuition already (see `concepts.md`), but user explicitly wants a deeper session on this later, once all phases are complete or whenever it naturally fits best (e.g. could pair well with Phase 8's Managed Identity work, since that's another trust/identity mechanism). Don't forget to circle back — user asked for this explicitly, not a "someday maybe."
