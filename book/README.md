@@ -7,6 +7,6 @@ Format/approach decisions are logged in `tutor/references/decisions.md` under "T
 ## Chapters
 
 1. [The Frontend Shell](chapter-01-frontend-shell.md) — Phase 0 (audit) + Phase 1 (React + Vite frontend, fully mocked, first live Azure deploy)
-2. *Backend Skeleton* — Phase 2 (not yet written)
-3. *MCP Tools and Real Data* — Phase 3 (not yet written)
-4. *The First Agent* — Phase 4 (not yet written — in progress)
+2. [The Backend Skeleton](chapter-02-backend-skeleton.md) — Phase 2 (FastAPI, arq→Service Bus, Postgres, worker, deployed to Azure Container Apps)
+3. [MCP Tools and Real Data](chapter-03-mcp-and-real-data.md) — Phase 3 (fan-out/caching redesign, real yfinance data, a rule-based Skill, an MCP search tool)
+4. [The First Agent](chapter-04-the-first-agent.md) — Phase 4, in progress (proving the tool-calling loop locally against Ollama; Context Assembler and a genuine LLM-discoverable Skill still ahead)
