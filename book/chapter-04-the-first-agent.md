@@ -224,9 +224,87 @@ Each "harness cycle" box in the second diagram is literally the whole first diag
 
 **One more distinction worth being precise about: Skills-loading is a harness-level feature, not something a raw model provides.** Auto-discovering a folder of instructions and presenting it to the model as an available option — what Claude Code itself does with its own Skills — lives in Anthropic's own harness products (Claude Code, Claude Desktop, the Agent SDK), not in the raw model or its plain API. Calling a model's Messages API directly gives no such mechanism for free; it would have to be built by hand. The direct consequence for this project: whichever model eventually gets deployed via Azure AI Foundry won't come with Skills-loading built in, regardless of which specific model it is — this project *is* its own worker's harness, so a smaller version of the same idea has to be built here too: a markdown file with instructions, and our own code that reads it and presents it as an available option in whatever tool-calling format that specific model's API expects. Most providers, OpenAI included, share the same underlying mechanism (function/tool calling) but not necessarily a feature specifically branded "Skills" with the same auto-discovery convention — worth verifying current state directly rather than assuming, since product features in this space are still moving.
 
+## The Context Assembler, Built for Real
+
+The test scripts above built `messages` by hand, inline — fine for a single throwaway proof, not fine as the actual shape of a reusable agent. The Context Assembler's job is to become the one *named* place that decision lives, rather than unexamined glue code sitting between "the tool ran" and "call the model again."
+
+```python
+# backend/worker/context_assembler.py
+SYSTEM_PROMPT = (
+    "You are a stock research assistant. You have access to tools for fetching "
+    "real stock data and, when genuinely useful, searching the web. Use them to "
+    "answer the user's question about a specific ticker. Be concise and factual."
+)
+
+def assemble_context(history: list[dict]) -> list[dict]:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for message in history:
+        if message["role"] == "assistant" and "thinking" in message:
+            # Drop old scratchpad reasoning before resending -- it already did its
+            # job producing that turn's decision; resending it only burns tokens.
+            message = {k: v for k, v in message.items() if k != "thinking"}
+        messages.append(message)
+    return messages
+```
+
+Three responsibilities, deliberately scoped to what this project actually needs right now rather than a hypothetical general-purpose version: add a system prompt (the test scripts never had one — the model only ever saw a bare user message); strip stale `thinking` content from prior assistant messages before resending them, which is the exact nuance named earlier as "a Context Assembler decision, not automatic"; and name a placeholder for trimming-to-fit-context-window, even though there's nothing to actually trim yet at this project's current scale of one ticker and a couple of tool calls.
+
+Proven the same way as everything else in this project — standalone, before being wired into anything real: a fake history including one assistant message with a `thinking` field goes in, and the output is checked for exactly three things — a system message now sits first, `thinking` is gone from the assistant message while `tool_calls` survived untouched, and the plain user/tool messages passed through with no changes at all.
+
+```
+$ uv run python -m llm_experiments.test_context_assembler
+[
+  { "role": "system", "content": "You are a stock research assistant..." },
+  { "role": "user", "content": "What's the current price of Apple stock?" },
+  { "role": "assistant", "content": "", "tool_calls": [ { "id": "call_1", "function": { "name": "fetch_stock_data", "arguments": { "ticker": "AAPL", "market": "US" } } } ] },
+  { "role": "tool", "tool_call_id": "call_1", "content": "{\"price\": 305.93}" }
+]
+
+All checks passed.
+```
+
+## A Swappable Model Client, and the Real Agent Loop
+
+Two more pieces closed the gap between "proven mechanism" and "a real agent." First, the raw `requests.post` calls scattered across the test scripts were pulled into one small function, `chat(messages, tools)` in `backend/worker/llm/model_client.py` — everything else talks to that function and only that function, so swapping Ollama for Azure AI Foundry later means changing what's *inside* this one function, not touching the loop, the Context Assembler, or the tools at all.
+
+Second, and more substantial: `test_tool_loop.py` was a fixed *two-turn script* — ask once, get one tool call, answer once. A real agent needs an actual **loop**, because the model might see a tool's result and decide it needs to call something else before it can answer, and a single response can request more than one tool call at once, not just one:
+
+```python
+def run_agent(ticker: str, market: str) -> dict:
+    history = [{"role": "user", "content": f"What's the current price and outlook for {ticker} in the {market} market?"}]
+
+    for _ in range(MAX_TURNS):
+        messages = assemble_context(history)
+        response = chat(messages, TOOL_SCHEMAS)
+        history.append(response)
+
+        tool_calls = response.get("tool_calls")
+        if not tool_calls:
+            return {"status": "success", "answer": response["content"]}
+
+        for tool_call in tool_calls:
+            function_name = tool_call["function"]["name"]
+            function_args = tool_call["function"]["arguments"]
+            result = TOOL_REGISTRY.get(function_name, lambda **_: {"error": f"unknown tool: {function_name}"})(**function_args)
+            history.append({"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(result)})
+
+    return {
+        "status": "max_turns_exceeded",
+        "partial_results": [json.loads(m["content"]) for m in history if m["role"] == "tool"],
+    }
+```
+
+`MAX_TURNS = 5` is a real, deliberate safety cap, not an arbitrary number — without one, a confused or looping model could keep calling tools indefinitely, burning real time and, once a paid model sits behind this instead of a free local one, real money, with no result ever produced. This is a small, early taste of the guardrail thinking a later phase covers properly.
+
+Run end to end against a real ticker, the whole chain held up — real price fetched, real synthesis produced. But the output surfaced something worth stating plainly rather than glossing past: the model's closing line claimed AAPL was "near its 52-week low," when the actual numbers it had just fetched ($305.93 against a $223.78–$344.57 range) put it roughly 68% of the way *up* that range — close to the high, not the low. Nothing was hallucinated — every number in the answer was real and correctly fetched — the model simply reasoned incorrectly about what those real numbers meant. This is concrete, first-hand evidence for something this project already had a design answer for before ever seeing the problem: Chapter 3's `flag_risk_factors` is a *fixed, deterministic* calculation of exactly this same "where in the range does the price sit" question, precisely because a plain arithmetic rule can't misjudge which end of a range a number falls on the way a model's free-form reasoning just did. The two aren't redundant — they're complementary, and this is the first real evidence of *why*. (A repeat run, for what it's worth, correctly said "near its 52-week high" — the first attempt was a one-off reasoning slip, not a consistent failure mode, itself worth knowing about a small local model's reliability.)
+
+**The first version's give-up path had a real honesty problem, worth naming directly.** `return "Agent did not produce a final answer within the turn limit."` was a bare string — returned identically to a genuine successful answer, meaning a caller (the worker, eventually the frontend) had no way to tell "here's a real report" apart from "the agent gave up," and would have written the give-up message straight into a report as if it were one. The fix: never disguise failure as success. `run_agent` now always returns a typed result — `{"status": "success", "answer": ...}` or `{"status": "max_turns_exceeded", "partial_results": [...]}`, carrying back whatever real tool results were actually gathered before giving up rather than nothing at all.
+
+This naturally raises a bigger question: what about *retrying* a failed call, not just reporting the failure honestly? That's deliberately **not** built here — it's its own dedicated later phase. This project's roadmap keeps three related-sounding concerns genuinely separate: today's fix is about *honest failure reporting* (the loop already stopped cleanly; the problem was disguising that as success). **Phase 6 (Checkpointing)** is about resuming a *crashed process* from where it left off, not restarting a whole ticker from scratch. **Phase 7 (Resilience)** is the one actually about retries — backoff around individual tool/agent calls, simulating a real failure and confirming graceful partial results instead of a crash, plus dead-letter handling for jobs that keep failing. Building real retry logic now, before there's an actual failure scenario to test it against, would be building Phase 7 early and out of context — the honest fix today is scoped to exactly what today's problem was.
+
 ## Where Phase 4 Actually Stands
 
-What's proven, concretely: a real model, given a real tool schema, makes a genuine decision; that decision is dispatched correctly by name, not assumption; a real function runs; a real result is fed back; a real, grounded final answer comes out the other side. None of this is wired into the worker yet, and several real pieces are still ahead — a proper Context Assembler (deciding what conversation history, memory, and tool results actually get sent each turn, and what gets trimmed), the genuine LLM-discoverable Skill this phase is committed to building (one requiring real interpretive judgment, unlike Chapter 3's fixed-rule `flag_risk_factors`), and the eventual swap from local Ollama to Azure AI Foundry — followed by, as always in this project, an actual deploy and a live check before the phase is called done.
+What's proven, concretely: a real model, given a real tool schema, makes a genuine decision; that decision is dispatched correctly by name, not assumption; a real function runs; a real result is fed back; a real, grounded final answer comes out the other side; a real Context Assembler now owns what goes into every call rather than that being scattered inline; and a real bounded agent loop — not a fixed two-turn script, and now with a typed, honest result rather than a disguised give-up string — ties it all together against real tools, with one honest, first-hand example of where the model's own reasoning can still go wrong even with correct data in hand. Still ahead: the genuine LLM-discoverable Skill this phase is committed to building (one requiring real interpretive judgment, unlike Chapter 3's fixed-rule `flag_risk_factors`), and the eventual swap from local Ollama to Azure AI Foundry with token/cost logging — followed by, as always in this project, an actual deploy and a live check before the phase is called done.
 
 ## Azure Components Used This Chapter
 
@@ -265,4 +343,6 @@ flowchart TB
 - A concrete, working understanding of what a "reasoning model's scratchpad" is, and that carrying it forward between turns is a design decision, not something the protocol hands you for free.
 - A dispatch mechanism that scales to more than one tool — matching by the name the model actually returned, not by which function happened to be hardcoded — with an honest account of what it does and doesn't protect against.
 - A precise, working distinction between a harness (everything needed to let one agent act) and an orchestrator (deciding which of several agents runs when, itself calling into the same harness machinery rather than reimplementing it) — and a name for what's still missing from this chapter's own harness so far: a Context Assembler and Skill discovery.
-- Phase 4 still open: the Context Assembler, the genuine LLM-discoverable Skill, the Azure AI Foundry swap, and the first live deploy of any of it are what's left before this chapter's story is actually finished.
+- A real Context Assembler, a swappable model-client function, and a genuine bounded agent loop (not a fixed script) — all proven standalone first, then together, against a real ticker.
+- First-hand, not theoretical, evidence for why a deterministic Skill and an LLM's own synthesis are complements, not duplicates: the same real data, correctly fetched, that the model misjudged ("near its low" when it wasn't) is exactly what a fixed-rule calculation can't get wrong.
+- Phase 4 still open: the genuine LLM-discoverable Skill, the Azure AI Foundry swap with token/cost logging, and the first live deploy of any of it are what's left before this chapter's story is actually finished.
