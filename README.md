@@ -10,7 +10,7 @@ the way.
 
 ## Status
 
-**Phase 1 — Frontend shell: complete.** **Phase 2 — Backend skeleton: complete.** FastAPI + Azure Service Bus (queue) + worker + Postgres, all deployed to Azure Container Apps and confirmed working end-to-end live in the browser, not just locally. Next: Phase 3 — MCP tools + real stock data.
+**Phase 1 — Frontend shell: complete.** **Phase 2 — Backend skeleton: complete.** **Phase 3 — MCP tools + real data: complete.** Real `yfinance` stock data (US + India, explicit market selection), a rule-based risk-flag Skill, and a custom MCP server (Tavily search, proven working but deliberately not wired into the automatic flow yet — see `tutor/references/decisions.md`) — all deployed and verified live. Next: Phase 4 — first LLM agent (Azure AI Foundry + tool-calling).
 
 ## Architecture
 
@@ -23,10 +23,10 @@ FastAPI (Container App, autoscale on HTTP)          ← ✅ live (alpha-api, ext
    ▼
 Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, no ingress, min 1 replica)
    │
-   ├─▶ LangGraph multi-agent flow                   ← not built yet (Phase 5) — currently a stub (fake summary)
+   ├─▶ LangGraph multi-agent flow                   ← not built yet (Phase 5) — currently deterministic Python, no agent/LLM yet
    │      ├─ calls Azure AI Foundry (model + tracing)    ← not built yet (Phase 4)
-   │      ├─ calls MCP tools (stock data, news)           ← not built yet (Phase 3)
-   │      ├─ loads Skills (reusable capability modules)   ← not built yet (Phase 5)
+   │      ├─ calls MCP tools (stock data, news)           ← stock data ✅ live (direct call, yfinance); Tavily search ✅ built + proven, not auto-wired (Tavily budget — see decisions.md)
+   │      ├─ loads Skills (reusable capability modules)   ← flag_risk_factors ✅ live (pure rule-based, no LLM yet — genuine LLM-discoverable Skill is a committed Phase 4 build)
    │      └─ reads/writes Redis + Postgres                ← both ✅ live (Redis currently just a per-ticker result cache, pulled forward from Phase 5; agent memory use still Phase 5)
    │
    └─▶ App Insights / OpenTelemetry                 ← not built yet (Phase 10)
@@ -78,7 +78,8 @@ flowchart TD
 
 ## What's working right now
 
-- Ticker input (comma-separated, multi-ticker), with format validation.
+- Ticker input (comma-separated, multi-ticker) with an explicit US/India market selector — a ticker
+  is only looked up in the chosen market, with a clear error on a mismatch rather than guessing.
 - Real end-to-end flow: each ticker in a request fans out independently — submit → per-ticker cache
   check (Azure Managed Redis) → cache hit returns instantly, cache miss queues via Azure Service Bus →
   real worker picks it up → status written to Azure Database for PostgreSQL → frontend polls and
@@ -86,8 +87,13 @@ flowchart TD
 - A same-day repeat request for a ticker already computed returns instantly from cache, skipping the
   queue entirely; a request mixing a cached ticker with a fresh one correctly returns the cached one
   immediately while only the fresh one is computed.
-- Report content is still a stub (fixed "looks solid, no major red flags" text per ticker) — real data
-  sourcing is Phase 3.
+- Real stock data (price, P/E, 52-week range) from `yfinance`, plus a rule-based risk-flag Skill
+  (near 52-week low, high/negative P/E) — both deterministic, no LLM involved yet.
+- A custom MCP server exposing Tavily web search, built and proven working — not yet wired into the
+  automatic research flow (deliberate, to protect a limited monthly search-API budget until Phase 4's
+  LLM can actually decide when a search is worth making).
+- Real narrative summarization (an actual LLM writing the report) is Phase 4 — right now the "report"
+  is these deterministic pieces assembled together, not an LLM's synthesis.
 
 ## Running locally
 
