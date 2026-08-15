@@ -108,11 +108,77 @@ Creating the Static Web App also auto-committed a GitHub Actions workflow file s
 
 A few minutes later, the workflow finished, and the fake, entirely mocked flow was live at a real public URL.
 
+## Azure Components Used This Chapter
+
+Just one, deliberately — the whole point of building layer by layer is that each chapter introduces as little new infrastructure as it actually needs.
+
+**Azure Static Web Apps** — a managed hosting service purpose-built for exactly this kind of app: a static frontend build (the output of `npm run build`), served from a global CDN, with zero servers to patch or scale by hand. Its most useful feature here wasn't hosting itself, though — it was the GitHub integration: connecting it to the repo during setup automatically generated a GitHub Actions workflow that rebuilds and redeploys on every push to `main`, with no separate CI/CD pipeline to hand-write. Configured on the **Free** tier (no cost at this scale), in the **East Asia** region — a detail that matters less than it sounds, since static content gets distributed globally through the CDN regardless of which region was picked at creation; that setting really only affects where deployment metadata lives.
+
 ## A Lesson From the Live Site
 
 One detail worth keeping, because it showed up as something concrete rather than just a definition: fetching the live URL with a tool that doesn't execute JavaScript — the same way most non-Google web crawlers behave — returned almost nothing. Just the page's `<title>` tag and an empty shell. No search box, no heading, nothing that a visitor's actual browser would show.
 
 This is the direct, visible consequence of client-side rendering: a crawler that never runs your JavaScript never sees your real content, because your real content doesn't exist until that JavaScript runs. It's not a bug in the deploy — it's exactly what CSR means, made concrete by a real tool hitting a real URL. (It's also not a problem for this particular app: a stock-research tool isn't something meant to be indexed by search engines in the first place.)
+
+## The Architecture So Far
+
+This diagram is the target shape of the whole system — everything the rest of this book builds toward. It will reappear at the end of every chapter, updated each time: green, solid boxes are live; gray, dashed boxes are still ahead. By the final chapter, the whole thing should be solid.
+
+Right now, after one chapter, exactly one box is real.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+
+    subgraph Frontend["Frontend"]
+        SWA["Azure Static Web Apps<br/>React SPA"]
+    end
+
+    subgraph Backend["Backend"]
+        API["Azure Container Apps<br/>FastAPI"]
+        Worker["Azure Container Apps<br/>Worker"]
+    end
+
+    subgraph Data["Data & Messaging"]
+        SB["Azure Service Bus<br/>queue"]
+        PG[("Azure Database<br/>for PostgreSQL")]
+        Redis[("Azure Managed Redis<br/>cache")]
+    end
+
+    subgraph AI["AI & Tools"]
+        Foundry["Azure AI Foundry<br/>LLM"]
+        MCP["MCP Tools<br/>(search, data)"]
+    end
+
+    subgraph Infra["Supporting Infrastructure"]
+        ACR["Azure Container Registry"]
+        KV["Azure Key Vault"]
+        Insights["Application Insights /<br/>Log Analytics"]
+    end
+
+    User --> SWA
+    SWA -.-> API
+    API -.-> SB
+    SB -.-> Worker
+    API -.-> PG
+    Worker -.-> PG
+    API -.-> Redis
+    Worker -.-> Redis
+    Worker -.-> Foundry
+    Worker -.-> MCP
+    ACR -.-> API
+    ACR -.-> Worker
+    KV -.-> API
+    KV -.-> Worker
+    API -.-> Insights
+    Worker -.-> Insights
+
+    classDef live fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef pending fill:#f5f5f5,stroke:#bbb,stroke-width:1px,stroke-dasharray: 4 3,color:#999
+
+    class SWA live
+    class API,Worker,SB,PG,Redis,Foundry,MCP,ACR,KV,Insights pending
+```
 
 ## What Came Out of This Chapter
 

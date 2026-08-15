@@ -25,6 +25,16 @@ For each fork, options + trade-offs + default recommendation. Always re-check ag
 - **User-facing:** API key for simplest MVP; JWT if the user wants real login/session semantics later.
 - **Service-to-service (backend → Azure services):** Managed Identity — no secrets/keys in code or env files.
 
+## The book (standing project, started 2026-08-15)
+- Format: markdown files in this repo, `book/` directory, one chapter per Phase — not a separate tool (mdBook/Docusaurus) or external doc system, at least to start.
+- Code references: inline snippets + plain file path mentions (e.g. "see `frontend/src/App.jsx`"), not GitHub permalinks to specific commit SHAs — simpler, doesn't break if files later change, chosen over more rigorous permalinks for now.
+- Depth: curated narrative, not a transcript — concepts, decisions + reasoning, code, gotchas, written as a coherent chapter. Actively synthesized, not a reformatted copy-paste of the actual back-and-forth.
+- Starting point: one full sample chapter (Phase 1) first, for review/approval before writing the rest — avoids redoing a lot of work if the first attempt misses what the user actually wants.
+- Phase 0 (the audit — minimal content, repo was empty) folded into Chapter 1's opening rather than given its own chapter.
+- **Two recurring sections, required in every chapter from now on, added after Chapter 1's first draft was reviewed:**
+  1. **"Azure Components Used This Chapter"** — what Azure resources got introduced this chapter specifically, what each one is, and why it fits. Keep scoped to *this chapter's* new resources, not a recap of everything so far.
+  2. **"The Architecture So Far"** — the *same* target-architecture Mermaid diagram in every chapter (don't redesign it per chapter), with node styling updated each time: `classDef live` (green, solid) for what's actually built by that point in the story, `classDef pending` (gray, dashed) for what's still ahead. Master diagram (defined once, in Chapter 1) covers: Frontend (Static Web Apps), Backend (Container Apps × 2: API + Worker), Data & Messaging (Service Bus, Postgres, Redis), AI & Tools (AI Foundry, MCP Tools), Supporting Infrastructure (Container Registry, Key Vault, App Insights/Log Analytics) — matches the real system being built, not an exhaustive/aspirational phases.md-style diagram. By the final chapter, every node should be green.
+
 ## Reusing `/Users/vinodjoshi/Work/Repos/buynobuy` for Phase 3+
 - Prior project: agentic stock analysis, LangGraph + local LLMs (Ollama/Groq) + yfinance + Tavily + BeautifulSoup scraping. No MCP used (confirmed via full codebase survey).
 - **Reuse the patterns and the working pieces, not the scaffolding**: `skills/utils/search.py`'s Tavily→DuckDuckGo→Playwright/Bing fallback chain and `agents/utils.py`'s LLM-JSON-cleanup helpers are genuinely portable. The Trendlyne/NSE/AmbitionBox scrapers are India-specific and not reused as-is (though useful reference if India-market depth beyond `yfinance` is ever needed). The sync Flask + local file-based caching/run-storage model is superseded entirely by our Postgres/Redis/Service Bus architecture.
