@@ -4,6 +4,104 @@ Personal glossary of concepts explained during tutoring sessions, in plain langu
 
 ---
 
+## Phase 4 — First agent (prep — build not started yet)
+
+### Harness vs. Orchestrator — related, not the same
+- **Harness** = the whole surrounding application that lets a raw model (stateless — text in, text out, remembers nothing on its own) actually act: the tool-calling loop, tool implementations, the Context Assembler, Skill discovery, permissions, session/UI handling. Claude Code (this very tool) is itself a harness around the raw Claude model.
+- **Orchestrator** = a narrower piece responsible only for sequencing *multiple* steps/agents — deciding what runs when, in what order, parallel or sequential, and how outputs feed forward (`buynobuy`'s LangGraph `StateGraph` is a real example). One agent needs zero orchestration (nothing to sequence) — orchestration only becomes relevant once there's more than one thing to coordinate.
+- **The key relationship, not obvious at first**: the orchestrator does not reimplement context assembly / tool-calling / skill discovery itself. For each agent it decides to invoke, it calls into the *same* harness machinery a single-agent setup would use — the orchestrator's only real job is *which* agent runs *when*, and what state to pass between them. Kitchen analogy: the harness is the kitchen (oven, prep counters, recipe cards); the orchestrator is the head chef deciding which dish gets made in what order — the chef doesn't personally chop vegetables, the kitchen's equipment does that for each step the chef calls for.
+- Mapped onto our own roadmap: Phase 4 = one agent, full harness (loop, tools, Context Assembler, Skills), no orchestrator needed. Phase 5 = an orchestrator added *on top*, calling that same harness cycle once per agent in its graph.
+
+```mermaid
+flowchart TB
+    subgraph HARNESS["Harness — everything needed to let ONE agent act"]
+        Loop["Tool-calling loop<br/>(call model, check for a tool request,<br/>run it, feed result back, repeat)"]
+        Tools["Tool implementations<br/>(fetch_stock_data, search, ...)"]
+        CA["Context Assembler<br/>(gathers memory + tool results + docs,<br/>trims to fit context window)"]
+        Skills["Skill discovery<br/>(scan skills folder, present as options)"]
+        Perms["Permissions / session handling"]
+    end
+
+    Model[("Raw LLM<br/>stateless — text in, text out")]
+
+    CA -->|assembled context + available tools/skills| Loop
+    Loop -->|sends prompt + tool schemas| Model
+    Model -->|"plain text, OR 'call this tool' request"| Loop
+    Loop -->|executes requested tool| Tools
+    Tools -->|result| Loop
+    Loop -.->|governs what's allowed| Perms
+    Loop -->|final answer| Out(["Result"])
+```
+
+```mermaid
+flowchart TB
+    Orchestrator["Orchestrator<br/>(decides WHICH agent runs WHEN,<br/>passes state between them)"]
+
+    subgraph S1["Step: News Agent"]
+        H1["= one full harness cycle,<br/>for THIS agent only"]
+    end
+    subgraph S2["Step: Technical Agent"]
+        H2["= one full harness cycle,<br/>for THIS agent only"]
+    end
+    subgraph S3["Step: Synthesizer Agent"]
+        H3["= one full harness cycle,<br/>for THIS agent only"]
+    end
+
+    Orchestrator -->|"1. run now"| S1
+    S1 -->|result| Orchestrator
+    Orchestrator -->|"2. run now, parallel"| S2
+    S2 -->|result| Orchestrator
+    Orchestrator -->|"3. run, feeding in both results"| S3
+    S3 -->|final result| Orchestrator
+```
+
+Each "harness cycle" box in the second diagram is literally the whole first diagram, run once per agent — the orchestrator never bypasses it or reimplements it.
+
+### Harness ≠ raw model API, and "Skills" is a harness-level feature, not a model-level one
+- Skills-loading (auto-discovering a `SKILL.md`-style folder, presenting it to the model) lives in **Anthropic's own harness products** (Claude Code, Claude Desktop, the Agent SDK) — not in the raw Claude model or its plain API. Calling the raw Messages API directly gives you no such mechanism; you'd build it yourself.
+- Consequence for us: whatever model we deploy via Azure AI Foundry won't come with Skills-loading "for free," regardless of which model it is — **we are the harness** for our own worker, so we build our own (smaller) version of that same idea: a markdown file with instructions, our own code that reads it and presents it as an available option in whatever tool-calling format that model's API expects.
+- OpenAI (and most providers) share the same *foundational* mechanism — function/tool calling — but not a feature specifically named "Skills" with the same auto-discovery convention, as far as confidently known; product features evolve, worth verifying current state rather than assuming.
+
+---
+
+## Phase 3 — MCP tools + real data
+
+### Direct API call design — yfinance, explicit market selection
+- `fetch_stock_data(ticker, market)` is a genuine "direct API call": our own code always calls it deterministically, no LLM/MCP involved — appropriate because there's no real judgment call about *whether* to fetch price data, only *which* market to check.
+- Explicit `market` parameter (US/India), not auto-detection/fallback across regions — a deliberate choice over an initial fallback-chain design: avoids ambiguity (a symbol could coincidentally exist in both markets with different meanings) and fails clearly on a mismatch (`"RELIANCE not found on US markets"`) instead of silently guessing wrong data.
+- `yfinance` reliability note: free, but unofficial (reverse-engineers Yahoo's own site) — no SLA, no documented rate limits, real risk of breaking or being throttled at scale, especially from a shared cloud IP. Accepted as a starting choice; revisit for real in Phase 7 if it becomes a practical problem.
+
+### Fan-out / fan-in + cache-aside — per-ticker caching design
+- **The insight**: "one job = one queue message = process the whole ticker list sequentially in one function call" means scaling worker replicas wouldn't actually speed up a single multi-ticker request — everything still happens in one place. Splitting into "one message per ticker" lets independent worker replicas genuinely process tickers in parallel — this is a real, standard distributed-systems pattern: **fan-out** (one request → many independent units of work) then **fan-in** (many results → one aggregated response).
+- **Data model shift**: from one row per job to one row per `(job_id, ticker)` pair — the `job_id` the frontend polls is now a *group key*, not a single row's identity. `GET /research/{job_id}` aggregates: not `"done"` until every child row is `"done"`.
+- **Cache-aside pattern**: check the cache before doing expensive work; on a miss, do the work then populate the cache for next time. Checking happens in the API (skip the queue entirely on a hit — bigger payoff than only skipping computation), writing happens in the worker (it's the one that has the fresh result). Both sides must agree on the exact same cache key format — same "shared contract" idea as the Service Bus message shape.
+- **TTL choice**: expiring at midnight (not "24 hours from now") matters when the requirement is literally "today" — a request at 11:59pm and another at 12:01am should not share a cache entry despite <24h passing. Small extra code (compute seconds-until-midnight) worth it when it's what was actually asked for.
+- 🏭 Real-world nuance, not just theory: after building this, we found actual delivery-latency inconsistency between two independently-sent Service Bus messages sent moments apart (one processes in seconds, the other sometimes 30-45s+, despite an actively-listening worker). Tried the obvious fix (reuse one persistent sender instead of one-per-message) — didn't resolve it; root cause still open. Not blocking in practice, because the frontend's polling design already tolerates arbitrary delay gracefully — a good example of how a system can be "resilient by accident" from earlier design choices, and a real motivating case for Phase 7 (Resilience) if it needs deeper investigation later.
+
+### TLS — basics (deep dive on handshakes/PKI deferred, see progress.md open questions)
+- Protects data *in transit*, not at rest — encrypts while traveling over the network, not once stored.
+- Not "an SDK encrypts your data" — the SDK (redis client, psycopg, browser `fetch`) just requests a TLS connection; the actual encryption is done transparently by a lower-level network/TLS library (OS/language's TLS stack, e.g. OpenSSL), invisible to application code on both ends.
+- Handshake happens first: client + server briefly use public-key crypto to agree on a temporary shared secret, without ever transmitting that secret somewhere an eavesdropper could grab it. After that, every byte is encrypted at the sender's network stack right before transmission, decrypted at the receiver's right after arrival — app code only ever sees plain data.
+- Public-key verification confirmed correct, refined: standard TLS is **one-way** — it verifies the *server's* identity (via its certificate + CA signature + hostname match + proof it holds the matching private key). It does **not** verify the client's identity — that's a separate step (our Redis access key, sent after the TLS tunnel is already up). Mutual TLS (both sides present certificates) exists but isn't what we're using.
+
+### MCP mechanics — registration, handshake, and the LLM's real relationship to it
+- **"Registration" is two different things**: inside the server, `@mcp.tool()` just appends a function into that `MCPServer` instance's own in-memory registry — nothing external contacted. The *client* finding out what's there is a separate step, `list_tools()`, over the actual connection. There's no global MCP directory servers auto-publish into — a client has to be explicitly told how to reach a given server (our `StdioServerParameters` *is* that explicit wiring).
+- **Two transport patterns, matched to different scenarios**: **stdio** — the client *starts* the server as a subprocess, right when needed; standard for local, ephemeral, same-machine tools (what we built, Option A). **HTTP** — the server is already running independently, like any normal web service; the client just connects, nothing to launch (this is Option B, deferred to Phase 11, and matches how most people picture "a server" intuitively).
+- **The handshake** (`initialize()`): client sends its protocol version + capabilities + identity; server responds with its own (negotiating a mutually compatible version); client sends `initialized` to confirm. Same negotiate-capabilities-first shape as the TLS handshake covered earlier.
+- **The LLM never speaks MCP directly** — this is the most commonly misunderstood part. MCP is a protocol between *application code* and a tool-providing server; the LLM is not a party to it. Real flow: app calls `list_tools()` → app *translates* those schemas into the LLM provider's own tool-calling format (Anthropic's/OpenAI's, different shapes) → app includes that translated list in the same API call as the prompt → LLM's response can include a structured "call tool X" block → app intercepts that and *only then* calls the real `call_tool()` → app feeds the result back to the LLM as a new message. MCP standardizes discovery + execution; it does not change how the LLM itself is invoked — that translation is always the app's job. This whole flow is Phase 4's "LLM tool-calling loop"; Phase 3 only proved the plumbing (steps 1 and the execution mechanism), with no LLM in the loop yet.
+- **Client capabilities (sampling/elicitation/roots) are NOT dynamically discovered like tools are** — they're a small, fixed, spec-defined vocabulary every MCP implementation already knows (e.g. `elicitation/create` is a fixed method name, not something a server "figures out"). The capability exchange during handshake is a yes/no checklist ("do you support elicitation?"), not a listing of custom function names. A **dispatcher** (SDK-internal) routes an incoming fixed-name request to whichever **callback** (a function handed over in advance, to be run later by someone else — like leaving your number with a restaurant host) the application registered for that category. No LLM or dynamic mapping involved in the routing itself.
+- **Tools vs. direct API call vs. Skill, precise definitions** (recap): a "tool"/"function call" means an LLM decides at runtime to invoke it. A "direct API call" (`fetch_stock_data`) is called deterministically by our own code — appropriate when there's no real judgment call about *whether* to fetch. A "Skill" is a reusable capability module loadable by any agent — a third, distinct concept from both.
+
+### `flag_risk_factors` Skill — line by line
+- `flags = []` — classic accumulator pattern: build a result by appending as issues are found, same shape as the summary-list building done with `.map()` earlier on the frontend, just imperative instead of functional here.
+- `.get("price")`, not `["price"]` — returns `None` on a missing key instead of crashing; defensive, since `fetch_stock_data`'s output isn't guaranteed to have every field for every ticker (some stocks genuinely lack P/E data on Yahoo).
+- 52-week-low check: `(price - low) / (high - low)` computes *where in the yearly range the current price sits*, as a fraction from 0 (exactly at the low) to 1 (exactly at the high). Below `0.1` (bottom 10% of the range) is flagged as "near its low." The `high > low` guard exists purely to avoid a divide-by-zero.
+- P/E check: a *negative* P/E is flagged separately (the company is currently losing money). A *very high positive* P/E (threshold `40`, a reasonable but somewhat arbitrary cutoff) is flagged as "richly valued" — priced in expectation of a lot of future growth, riskier if that growth doesn't show up.
+- **Why this counts as a "Skill" despite being invoked exactly like a direct call**: the invocation mechanism (our code calls it deterministically) is identical to `fetch_stock_data`'s. What makes it a *Skill* specifically is being a self-contained, *named, reusable* unit of capability logic that a different agent could load later, independent of how it's invoked. The tool/direct-call/Skill distinction is about invocation; Skill-*ness* is about being packaged as a standalone reusable module.
+- **Important caveat the user surfaced**: this is the "plain reusable module" meaning of Skill (matching `project-structure.md`'s own definition) — not the fuller "Claude Skills" meaning (an LLM discovers and *chooses* to apply packaged, judgment-requiring knowledge), which is the actual reason Skills became a notable concept in the first place. This one has no genuine ambiguity for an LLM to add value on — fixed numeric thresholds, always run, never optional. A true LLM-discoverable Skill (something with real interpretive judgment) is a committed Phase 4 build, not retrofitted onto this one.
+
+---
+
 ## Phase 2 — Backend
 
 ### FastAPI + Uvicorn + uv — who does what
@@ -115,27 +213,6 @@ evil.com (Malicious JS)          Browser (CORS Enforcer)              mybank.com
 - Least-privilege access: created two separate SAS policies on the queue (`send-only` for the API, `listen-only` for the worker) instead of handing both the full-manage root key — same trust-boundary principle as the CORS/VNet discussions earlier, applied to the queue.
 - Verified in isolation before wiring into the real app: sent a message via a throwaway script, confirmed it actually landed using `az servicebus queue show`'s message count (not just "no errors") — same "prove the new piece works standalone" discipline as arq/Redis originally.
 - 🏭 Real gotcha caught in testing, not just a lesson: Python buffers `print()` output when not attached to a terminal — exactly the situation inside a container. Output still happens, just delayed/batched in logs. Fixed with `ENV PYTHONUNBUFFERED=1` in the worker's Dockerfile — otherwise live container logs would appear to lag behind reality once deployed.
-
-### TLS — basics (deep dive on handshakes/PKI deferred, see progress.md open questions)
-- Protects data *in transit*, not at rest — encrypts while traveling over the network, not once stored.
-- Not "an SDK encrypts your data" — the SDK (redis client, psycopg, browser `fetch`) just requests a TLS connection; the actual encryption is done transparently by a lower-level network/TLS library (OS/language's TLS stack, e.g. OpenSSL), invisible to application code on both ends.
-- Handshake happens first: client + server briefly use public-key crypto to agree on a temporary shared secret, without ever transmitting that secret somewhere an eavesdropper could grab it. After that, every byte is encrypted at the sender's network stack right before transmission, decrypted at the receiver's right after arrival — app code only ever sees plain data.
-- Public-key verification confirmed correct, refined: standard TLS is **one-way** — it verifies the *server's* identity (via its certificate + CA signature + hostname match + proof it holds the matching private key). It does **not** verify the client's identity — that's a separate step (our Redis access key, sent after the TLS tunnel is already up). Mutual TLS (both sides present certificates) exists but isn't what we're using.
-
-### MCP mechanics — registration, handshake, and the LLM's real relationship to it
-- **"Registration" is two different things**: inside the server, `@mcp.tool()` just appends a function into that `MCPServer` instance's own in-memory registry — nothing external contacted. The *client* finding out what's there is a separate step, `list_tools()`, over the actual connection. There's no global MCP directory servers auto-publish into — a client has to be explicitly told how to reach a given server (our `StdioServerParameters` *is* that explicit wiring).
-- **Two transport patterns, matched to different scenarios**: **stdio** — the client *starts* the server as a subprocess, right when needed; standard for local, ephemeral, same-machine tools (what we built, Option A). **HTTP** — the server is already running independently, like any normal web service; the client just connects, nothing to launch (this is Option B, deferred to Phase 11, and matches how most people picture "a server" intuitively).
-- **The handshake** (`initialize()`): client sends its protocol version + capabilities + identity; server responds with its own (negotiating a mutually compatible version); client sends `initialized` to confirm. Same negotiate-capabilities-first shape as the TLS handshake covered earlier.
-- **The LLM never speaks MCP directly** — this is the most commonly misunderstood part. MCP is a protocol between *application code* and a tool-providing server; the LLM is not a party to it. Real flow: app calls `list_tools()` → app *translates* those schemas into the LLM provider's own tool-calling format (Anthropic's/OpenAI's, different shapes) → app includes that translated list in the same API call as the prompt → LLM's response can include a structured "call tool X" block → app intercepts that and *only then* calls the real `call_tool()` → app feeds the result back to the LLM as a new message. MCP standardizes discovery + execution; it does not change how the LLM itself is invoked — that translation is always the app's job. This whole flow is Phase 4's "LLM tool-calling loop"; Phase 3 only proved the plumbing (steps 1 and the execution mechanism), with no LLM in the loop yet.
-- **Client capabilities (sampling/elicitation/roots) are NOT dynamically discovered like tools are** — they're a small, fixed, spec-defined vocabulary every MCP implementation already knows (e.g. `elicitation/create` is a fixed method name, not something a server "figures out"). The capability exchange during handshake is a yes/no checklist ("do you support elicitation?"), not a listing of custom function names. A **dispatcher** (SDK-internal) routes an incoming fixed-name request to whichever **callback** (a function handed over in advance, to be run later by someone else — like leaving your number with a restaurant host) the application registered for that category. No LLM or dynamic mapping involved in the routing itself.
-- **Tools vs. direct API call vs. Skill, precise definitions** (recap): a "tool"/"function call" means an LLM decides at runtime to invoke it. A "direct API call" (`fetch_stock_data`) is called deterministically by our own code — appropriate when there's no real judgment call about *whether* to fetch. A "Skill" is a reusable capability module loadable by any agent — a third, distinct concept from both.
-
-### Fan-out / fan-in + cache-aside — per-ticker caching design
-- **The insight**: "one job = one queue message = process the whole ticker list sequentially in one function call" means scaling worker replicas wouldn't actually speed up a single multi-ticker request — everything still happens in one place. Splitting into "one message per ticker" lets independent worker replicas genuinely process tickers in parallel — this is a real, standard distributed-systems pattern: **fan-out** (one request → many independent units of work) then **fan-in** (many results → one aggregated response).
-- **Data model shift**: from one row per job to one row per `(job_id, ticker)` pair — the `job_id` the frontend polls is now a *group key*, not a single row's identity. `GET /research/{job_id}` aggregates: not `"done"` until every child row is `"done"`.
-- **Cache-aside pattern**: check the cache before doing expensive work; on a miss, do the work then populate the cache for next time. Checking happens in the API (skip the queue entirely on a hit — bigger payoff than only skipping computation), writing happens in the worker (it's the one that has the fresh result). Both sides must agree on the exact same cache key format — same "shared contract" idea as the Service Bus message shape.
-- **TTL choice**: expiring at midnight (not "24 hours from now") matters when the requirement is literally "today" — a request at 11:59pm and another at 12:01am should not share a cache entry despite <24h passing. Small extra code (compute seconds-until-midnight) worth it when it's what was actually asked for.
-- 🏭 Real-world nuance, not just theory: after building this, we found actual delivery-latency inconsistency between two independently-sent Service Bus messages sent moments apart (one processes in seconds, the other sometimes 30-45s+, despite an actively-listening worker). Tried the obvious fix (reuse one persistent sender instead of one-per-message) — didn't resolve it; root cause still open. Not blocking in practice, because the frontend's polling design already tolerates arbitrary delay gracefully — a good example of how a system can be "resilient by accident" from earlier design choices, and a real motivating case for Phase 7 (Resilience) if it needs deeper investigation later.
 
 ### Frontend ↔ real backend integration
 - Replaced the fake `setTimeout` flow with a real `fetch(..., { method: 'POST' })` to `/research`, then a `setInterval`-based `pollStatus` that calls `GET /research/{job_id}` every second until `data.status === 'done'`, then `clearInterval` to stop — same polling concept discussed abstractly earlier ("who changes state to done"), now doing real work.
