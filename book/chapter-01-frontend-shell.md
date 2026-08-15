@@ -122,62 +122,17 @@ This is the direct, visible consequence of client-side rendering: a crawler that
 
 ## The Architecture So Far
 
-This diagram is the target shape of the whole system — everything the rest of this book builds toward. It will reappear at the end of every chapter, updated each time: green, solid boxes are live; gray, dashed boxes are still ahead. By the final chapter, the whole thing should be solid.
-
-Right now, after one chapter, exactly one box is real.
+This diagram shows only what actually exists after this chapter — nothing previewed ahead of the story. It will grow, chapter by chapter, as each new piece actually gets built; by the final chapter it'll show the whole system. Right now, after one chapter, it's exactly one box.
 
 ```mermaid
 flowchart TB
     User(["Visitor's browser"])
-
-    subgraph Frontend["Frontend"]
-        SWA["Azure Static Web Apps<br/>React SPA"]
-    end
-
-    subgraph Backend["Backend"]
-        API["Azure Container Apps<br/>FastAPI"]
-        Worker["Azure Container Apps<br/>Worker"]
-    end
-
-    subgraph Data["Data & Messaging"]
-        SB["Azure Service Bus<br/>queue"]
-        PG[("Azure Database<br/>for PostgreSQL")]
-        Redis[("Azure Managed Redis<br/>cache")]
-    end
-
-    subgraph AI["AI & Tools"]
-        Foundry["Azure AI Foundry<br/>LLM"]
-        MCP["MCP Tools<br/>(search, data)"]
-    end
-
-    subgraph Infra["Supporting Infrastructure"]
-        ACR["Azure Container Registry"]
-        KV["Azure Key Vault"]
-        Insights["Application Insights /<br/>Log Analytics"]
-    end
+    SWA["Azure Static Web Apps<br/>React SPA"]
 
     User --> SWA
-    SWA -.-> API
-    API -.-> SB
-    SB -.-> Worker
-    API -.-> PG
-    Worker -.-> PG
-    API -.-> Redis
-    Worker -.-> Redis
-    Worker -.-> Foundry
-    Worker -.-> MCP
-    ACR -.-> API
-    ACR -.-> Worker
-    KV -.-> API
-    KV -.-> Worker
-    API -.-> Insights
-    Worker -.-> Insights
 
     classDef live fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
-    classDef pending fill:#f5f5f5,stroke:#bbb,stroke-width:1px,stroke-dasharray: 4 3,color:#999
-
     class SWA live
-    class API,Worker,SB,PG,Redis,Foundry,MCP,ACR,KV,Insights pending
 ```
 
 ## What Came Out of This Chapter
