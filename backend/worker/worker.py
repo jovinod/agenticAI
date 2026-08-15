@@ -2,11 +2,17 @@ import asyncio
 import json
 import os
 from datetime import date, datetime, timedelta
+from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from models import TickerJob
 from tools.stock_data import fetch_stock_data
+from skills.flag_risk_factors.flag_risk_factors import flag_risk_factors
+
+# No-op in Azure (no .env.local file there) — Container Apps sets real env vars directly.
+# Doesn't override an already-set env var, so an explicit shell export still wins if used.
+load_dotenv(".env.local")
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
@@ -56,6 +62,11 @@ async def process_ticker(job_id: str, ticker: str, market: str):
             f"{ticker}: {data['currency']} {data['price']}, "
             f"P/E {data['pe_ratio']}, 52w range {data['fifty_two_week_low']}-{data['fifty_two_week_high']}"
         )
+        # Skill — reusable capability module, not an LLM decision or a direct
+        # data-source call (see tools/web_search.py docstring for that distinction).
+        flags = flag_risk_factors(data)
+        if flags:
+            summary_line += " | Risk flags: " + "; ".join(flags)
     print(f"{ticker} done.")
 
     result = {"tickers": [ticker], "summary": [summary_line]}

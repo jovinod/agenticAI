@@ -33,6 +33,19 @@ For each fork, options + trade-offs + default recommendation. Always re-check ag
 - **LangGraph/orchestration**: buynobuy genuinely does use LangGraph for real phase-level multi-agent orchestration (which agents run when, parallel fan-out/fan-in) — confirmed, not a wrong impression. What's *not* live is a finer-grained ReAct tool-selection loop *within* an individual agent (present in the codebase but vestigial/unused). Deliberately **not** pulling full multi-agent orchestration learning forward into Phase 3 — it needs multiple real agents to exist first (Phase 4), so doing it now would be the actual force-fit. Sequenced properly into Phase 5, where `phases.md` already named it, using buynobuy's real `StateGraph` pattern as reference at that point.
 - **Terminology, precise**: a "tool"/"function call" specifically means an LLM decides at runtime to invoke it. A "direct API call" (our `fetch_stock_data`) is called deterministically by our own code — no LLM decision involved, appropriate when there's no real judgment call about *whether* to fetch (we always want price data). A "Skill" (our project's own vocabulary) is a reusable capability module loadable by any agent — distinct from both.
 
+## MCP Python SDK naming — `FastMCP` renamed to `MCPServer`
+- The installed `mcp` package (v2.0.0+) has no `mcp.server.fastmcp.FastMCP` — that's the name used in older docs/tutorials. Current path: `from mcp.server.mcpserver import MCPServer`. Same decorator-based API otherwise (`.tool()`, `.run()`). No backward-compat alias exists — if following older MCP examples, expect this exact import to fail.
+- `load_dotenv()` inside an MCP server meant to be spawned as a subprocess needs a **file-relative** path (`pathlib.Path(__file__).parent / ".env.local"`), not a bare relative one — the subprocess's working directory isn't guaranteed to match wherever the client happens to be run from. Same fix `buynobuy` already used for the identical problem.
+
+## MCP search server — local shape now, real shape later
+- Chose Option A (stdio transport, spawned in-process by the worker) for the Phase 3 build — simplest, keeps focus on protocol mechanics rather than deployment topology.
+- **Deliberately deferred to Phase 11 (Scaling validation)**: graduate to Option B — its own Container App, HTTP transport, independently autoscaled. User explicitly asked this not be forgotten.
+
+## Local env vars — `.env.local` + `python-dotenv` (backend/worker)
+- Adopted once the list of required local env vars grew past "just type them by hand each time" (`DATABASE_URL`, `SERVICEBUS_CONNECTION_STRING`, `REDIS_*`, `TAVILY_API_KEY`). Matches `buynobuy`'s own convention.
+- Gitignored, never committed. `load_dotenv(".env.local")` at the top of `worker.py` — no-ops harmlessly if the file doesn't exist (i.e. in Azure, where Container Apps sets real env vars directly) and doesn't override an already-set env var if one exists.
+- Not yet added to `backend/api` — only introduced where the immediate need (Tavily key) was, not scope-crept to the other service.
+
 ## Human-in-the-loop (not built — documented for later)
 - Concept: a pause/approval gate before an agent takes a risky or irreversible action (payments, deletions, sending something on the user's behalf, etc.).
 - **Not needed for this app's current scope** — stock research is read-only; there's no risky action for anything to gate. Not a phase, not built.

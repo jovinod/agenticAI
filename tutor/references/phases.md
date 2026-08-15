@@ -97,8 +97,8 @@ Build: enable Azure AI Foundry tracing; add Application Insights + OpenTelemetry
 
 ## Phase 11 — Scaling validation
 Concepts: autoscaling triggers (HTTP traffic vs. queue depth) — already deployed on Container Apps since Phase 2, this phase is about *proving* it scales, and tuning it.
-Build: load-test by submitting many jobs at once (script it, or several tickers rapid-fire).
-**Deploy & verify:** watch worker container count scale up in Azure Portal under load, then scale back down after. Tune min/max replica settings if needed.
+Build: load-test by submitting many jobs at once (script it, or several tickers rapid-fire). **Also graduate the Phase 3 MCP search server** from Option A (stdio, spawned in-process by the worker — chosen deliberately in Phase 3 to focus on protocol mechanics first) to Option B (its own Container App, HTTP transport, independently autoscaled) — this is the natural point to prove it scales independently from ticker-processing load, and to make it reusable by any future consumer without duplicating the subprocess-spawning logic.
+**Deploy & verify:** watch worker container count scale up in Azure Portal under load, then scale back down after. Tune min/max replica settings if needed. Confirm the MCP search server (now its own Container App) scales independently too.
 
 ## Phase 12 — Polish & final wiring
 Build: final UI polish, error states in the frontend for failed jobs, README documenting the deployed architecture. Consider upgrading the current polling-based return path (frontend repeatedly asking "done yet?") to a streaming one (see results incrementally as each agent finishes, not all-or-nothing) — worth being precise that this is an *enhancement*, not a gap-fill, since polling already provides a working return path from day one.
