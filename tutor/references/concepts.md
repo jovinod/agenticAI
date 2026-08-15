@@ -4,7 +4,14 @@ Personal glossary of concepts explained during tutoring sessions, in plain langu
 
 ---
 
-## Phase 4 — First agent (prep — build not started yet)
+## Phase 4 — First agent (build started)
+
+### 💡 Important Bytes — nuances you only learn by actually building an agentic system
+Sharp, concrete insights that don't show up from reading about agents in the abstract — only from wiring the real thing together and hitting the actual detail. Kept separate from the more standard concept explanations below because these are the ones worth re-reading before building anything similar again. Growing list, added to as we hit more.
+
+- **Tool call IDs matter the moment there's more than one.** A model's response can include a `tool_calls` array with entries like `{"id": "call_alzxxjea", "function": {...}}`. With a single tool call this ID feels decorative — but the moment a model requests *multiple* tools in one turn, the result you send back for each one has to reference the matching ID, or the model has no reliable way to know which result answers which request. Not obvious until you actually look at a real response payload.
+- **Reasoning-model "thinking" content is a Context Assembler decision, not automatic.** Qwen3 (and other reasoning models) return their scratchpad reasoning in a field separate from the final answer/tool-call. Whether that scratchpad gets *re-included* the next time you send conversation history back to the model is a real design choice, made by whichever piece assembles that next prompt — not something the protocol or the model handles for you. Common practice leans toward dropping old scratchpad content from re-sent history (it did its job producing that turn's answer; re-feeding it back mostly burns tokens) — but it's a decision someone's code has to actually make, not a given.
+- **The model inferring `ticker: "AAPL"` and `market: "US"` from "Apple stock" is genuine reasoning, not a lookup we provided.** Nothing in our tool schema or prompt told it Apple's ticker or which market it trades on — that came from the model's own training. Worth noticing precisely *what* the model contributed vs. what our code provided, each time a tool call comes back — it's easy to blur the line between "our code's logic" and "the model's own knowledge" once things are wired together.
 
 ### Harness vs. Orchestrator — related, not the same
 - **Harness** = the whole surrounding application that lets a raw model (stateless — text in, text out, remembers nothing on its own) actually act: the tool-calling loop, tool implementations, the Context Assembler, Skill discovery, permissions, session/UI handling. Claude Code (this very tool) is itself a harness around the raw Claude model.
