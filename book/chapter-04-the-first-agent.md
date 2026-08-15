@@ -48,7 +48,18 @@ Before wiring in real execution, the first isolated test asked a narrower questi
 
 ## Second Proof: The Full Loop, Executed for Real
 
-With the decision step confirmed, the next script closed the loop completely — actually running `fetch_stock_data`, feeding the real result back, and getting a genuine final answer built from real numbers. This is the full, real terminal output from running it:
+With the decision step confirmed, the next script closed the loop completely — actually running `fetch_stock_data`, feeding the real result back, and getting a genuine final answer built from real numbers.
+
+Running it hit one small, familiar-shaped gotcha first. From inside its own folder, `python test_tool_loop.py` fails with `ModuleNotFoundError: No module named 'tools'` — Python adds the *script's own directory* to its import path, not the current working directory, so the sibling `tools/` package one level up becomes invisible. The fix is running it as a module instead, from the parent directory where `tools/` actually lives as a sibling:
+
+```bash
+cd backend/worker
+uv run python -m llm_experiments.test_tool_loop
+```
+
+The `-m` flag tells Python to resolve imports relative to the current directory rather than the script's own location — the same root cause, one more time, as the earlier `.env.local` path issue: a script's assumed "current location" and its actual import root aren't automatically the same thing.
+
+This is the full, real terminal output from running it that way:
 
 ```
 ======================================================================
@@ -156,6 +167,63 @@ real_result = tool_function(**function_args)
 
 This is the same shape as MCP's own dispatcher, one level up: MCP routes an incoming request to the right *tool implementation* by name; this registry routes a *model's decision* to the right *Python function* by name. It also clarifies where the real safety boundary sits: a tool's `name` is its entire identity — two tools can never safely share one, since neither the registry nor the model itself could tell them apart — while its *arguments* aren't matched against anything at dispatch time at all. If the model sent a malformed or missing argument, this code would fail loudly with a Python `TypeError` at the call site, not silently. A production version would validate arguments against the schema before calling, and feed a correctable error back to the model rather than crashing — noted honestly as a real gap, not yet built.
 
+## Harness vs. Orchestrator — Two Words That Sound Like They Mean the Same Thing
+
+Before going further, two terms that come up constantly discussing agent architecture are worth pinning down precisely, since they're easy to blur together and this project's own roadmap depends on the distinction.
+
+**A harness is the whole surrounding application that lets a raw model actually act.** A raw LLM is stateless — text in, text out, remembers nothing on its own between calls. Everything proven in this chapter — the tool-calling loop, the tool implementations, deciding what context to send, discovering what capabilities are available, handling permissions — is harness work. Claude Code itself, the tool writing this book, is a harness wrapped around a raw Claude model, in exactly this sense.
+
+**An orchestrator is a narrower role: deciding which of several agents runs when.** It only matters once there's more than one agent to sequence — one agent needs zero orchestration, since there's nothing to coordinate. `buynobuy`'s LangGraph `StateGraph` is a real, working example of this role.
+
+The relationship that isn't obvious until you look closely: **an orchestrator does not reimplement context assembly, tool-calling, or capability discovery itself.** For each agent it decides to run, it calls into the *same* harness machinery a single-agent setup would use — its only actual job is deciding *which* agent runs *when*, and what state passes between them. A kitchen analogy holds up well: the harness is the kitchen itself — oven, prep counters, recipe cards, everything needed to actually cook; the orchestrator is the head chef deciding which dish gets made in what order. The chef doesn't personally chop the vegetables — the kitchen's own equipment does that, every time, for whichever dish is currently being made.
+
+```mermaid
+flowchart TB
+    subgraph HARNESS["Harness — everything needed to let ONE agent act"]
+        Loop["Tool-calling loop<br/>(call model, check for a tool request,<br/>run it, feed result back, repeat)"]
+        Tools["Tool implementations<br/>(fetch_stock_data, search, ...)"]
+        CA["Context Assembler<br/>(gathers memory + tool results + docs,<br/>trims to fit context window)"]
+        Skills["Skill discovery<br/>(scan skills folder, present as options)"]
+        Perms["Permissions / session handling"]
+    end
+
+    Model[("Raw LLM<br/>stateless — text in, text out")]
+
+    CA -->|assembled context + available tools/skills| Loop
+    Loop -->|sends prompt + tool schemas| Model
+    Model -->|"plain text, OR 'call this tool' request"| Loop
+    Loop -->|executes requested tool| Tools
+    Tools -->|result| Loop
+    Loop -.->|governs what's allowed| Perms
+    Loop -->|final answer| Out(["Result"])
+```
+
+```mermaid
+flowchart TB
+    Orchestrator["Orchestrator<br/>(decides WHICH agent runs WHEN,<br/>passes state between them)"]
+
+    subgraph S1["Step: News Agent"]
+        H1["= one full harness cycle,<br/>for THIS agent only"]
+    end
+    subgraph S2["Step: Technical Agent"]
+        H2["= one full harness cycle,<br/>for THIS agent only"]
+    end
+    subgraph S3["Step: Synthesizer Agent"]
+        H3["= one full harness cycle,<br/>for THIS agent only"]
+    end
+
+    Orchestrator -->|"1. run now"| S1
+    S1 -->|result| Orchestrator
+    Orchestrator -->|"2. run now, parallel"| S2
+    S2 -->|result| Orchestrator
+    Orchestrator -->|"3. run, feeding in both results"| S3
+    S3 -->|final result| Orchestrator
+```
+
+Each "harness cycle" box in the second diagram is literally the whole first diagram, run once per agent — the orchestrator never bypasses it or reimplements it separately for each agent it manages. Mapped onto this project's own roadmap: this chapter's work is entirely single-agent harness — the loop, the tools, and (still ahead) the Context Assembler and Skill discovery, with no orchestrator needed yet, since there's only ever one agent so far. An orchestrator gets added *on top* of this same harness once multiple real agents exist to coordinate, later in the project.
+
+**One more distinction worth being precise about: Skills-loading is a harness-level feature, not something a raw model provides.** Auto-discovering a folder of instructions and presenting it to the model as an available option — what Claude Code itself does with its own Skills — lives in Anthropic's own harness products (Claude Code, Claude Desktop, the Agent SDK), not in the raw model or its plain API. Calling a model's Messages API directly gives no such mechanism for free; it would have to be built by hand. The direct consequence for this project: whichever model eventually gets deployed via Azure AI Foundry won't come with Skills-loading built in, regardless of which specific model it is — this project *is* its own worker's harness, so a smaller version of the same idea has to be built here too: a markdown file with instructions, and our own code that reads it and presents it as an available option in whatever tool-calling format that specific model's API expects. Most providers, OpenAI included, share the same underlying mechanism (function/tool calling) but not necessarily a feature specifically branded "Skills" with the same auto-discovery convention — worth verifying current state directly rather than assuming, since product features in this space are still moving.
+
 ## Where Phase 4 Actually Stands
 
 What's proven, concretely: a real model, given a real tool schema, makes a genuine decision; that decision is dispatched correctly by name, not assumption; a real function runs; a real result is fed back; a real, grounded final answer comes out the other side. None of this is wired into the worker yet, and several real pieces are still ahead — a proper Context Assembler (deciding what conversation history, memory, and tool results actually get sent each turn, and what gets trimmed), the genuine LLM-discoverable Skill this phase is committed to building (one requiring real interpretive judgment, unlike Chapter 3's fixed-rule `flag_risk_factors`), and the eventual swap from local Ollama to Azure AI Foundry — followed by, as always in this project, an actual deploy and a live check before the phase is called done.
@@ -196,4 +264,5 @@ flowchart TB
 - A real, working proof of the full tool-calling loop against a real model: decide → execute for real → feed the real result back → genuine grounded answer.
 - A concrete, working understanding of what a "reasoning model's scratchpad" is, and that carrying it forward between turns is a design decision, not something the protocol hands you for free.
 - A dispatch mechanism that scales to more than one tool — matching by the name the model actually returned, not by which function happened to be hardcoded — with an honest account of what it does and doesn't protect against.
+- A precise, working distinction between a harness (everything needed to let one agent act) and an orchestrator (deciding which of several agents runs when, itself calling into the same harness machinery rather than reimplementing it) — and a name for what's still missing from this chapter's own harness so far: a Context Assembler and Skill discovery.
 - Phase 4 still open: the Context Assembler, the genuine LLM-discoverable Skill, the Azure AI Foundry swap, and the first live deploy of any of it are what's left before this chapter's story is actually finished.

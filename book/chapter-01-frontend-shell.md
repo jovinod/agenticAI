@@ -16,6 +16,13 @@ A few options were on the table — plain HTML/CSS/JS, React, Vue, Svelte, Angul
 
 React won out for a specific reason, not just popularity: this app's whole shape is a state machine — a ticker gets typed in, a request goes out, a result comes back — and React's core specialty is exactly that: describe what the UI should look like for a given state, and let the framework figure out how to update the screen. Vite was paired with it as the build tool — fast local development, minimal configuration, and a clean path to a deployable static build.
 
+It's worth being precise about what React actually removes, since "framework" can sound bigger than it is. React doesn't write your markup or your CSS for you — you still write JSX (HTML-shaped) and styles yourself. What it removes is the *manual bookkeeping* of keeping the real page in sync with changing data: in plain JavaScript, showing a loading spinner and then swapping in a result means writing (and maintaining) your own "find this element → hide it → show that one → fill in these values" code, by hand, for every place data changes. It's easy to update one spot and forget a related one. React's alternative: describe what the UI should look like *for the current state*, as a plain function, and let React figure out what actually needs to change on the real page.
+
+Two of the other options deserve a specific correction rather than a passing mention, since assumptions about them are easy to get wrong:
+
+- **Angular** is a genuine all-in-one framework — routing, forms, HTTP, dependency injection, and testing all built in, with its own template syntax (`*ngIf` rather than JSX). It's a strong choice for large teams that want one enforced "right way" to do things. A common misconception worth correcting directly: **Angular is client-side rendered by default, exactly like plain React** — server-side rendering is only available as an optional add-on (Angular Universal), not automatic. Don't assume "Angular" implies SSR or better SEO out of the box; it doesn't, unless that add-on is deliberately configured.
+- **Next.js isn't a peer of React** — it's React *plus* additional machinery, most notably server-side rendering and static generation (routing comes along too, but rendering is the bigger feature). For a single-input-screen app with no SEO requirement, that machinery is pure overhead with no payoff.
+
 ## What "Building a React App" Actually Means
 
 Before writing any application code, a few things needed to actually be understood, not just used.
@@ -23,6 +30,39 @@ Before writing any application code, a few things needed to actually be understo
 **JSX isn't valid JavaScript.** The familiar-looking `<div>Hello</div>` syntax inside a `.jsx` file is shorthand for a real JavaScript function call, `React.createElement("div", null, "Hello")`. Browsers only ever run the second form. A build step — Vite, in this project — transpiles every JSX-looking bit into real JavaScript, bundles many source files into a handful of files (loading dozens of files one by one over the network is slow), and strips out development-only extras like React's console warnings. `npm run dev` does this on the fly, in memory, for local editing with instant reload. `npm run build` writes the final result to a `dist/` folder as plain HTML/CSS/JS — static files, servable by literally anything, with no server-side computation required per request.
 
 **The app renders entirely in the browser.** This is called client-side rendering (CSR): the server sends back a nearly empty HTML shell — just a `<div id="root"></div>` and a `<script>` tag — the same shell to every visitor, regardless of what they're about to search for. The browser downloads and runs the JavaScript bundle, and *that* code builds the actual visible page. For dynamic data, the pattern is the same shell first, then a separate API call afterward, once the page is already up. This matters later: it's exactly why the frontend (Phase 1) could be built and deployed completely before any backend (Phase 2) existed — the shell doesn't need real data to exist and be deployable.
+
+**Two genuinely separate servers are involved, not one**, and that separation is *why* this sequencing works at all:
+
+```mermaid
+sequenceDiagram
+    participant B as Browser (Client)
+    participant S as Static File Server<br/>(Azure Static Web Apps)
+    participant A as Backend API<br/>(FastAPI, Phase 2+)
+
+    Note over B,S: 1. Initial page load
+    B->>S: GET /
+    S-->>B: near-empty HTML shell + JS bundle<br/>(same for every visitor — static files)
+
+    Note over B: 2. Browser runs the JS bundle<br/>React builds the UI in memory, writes into the DOM<br/>(this is "client-side rendering")
+    Note over B: Page now shows the idle ticker-input screen
+
+    Note over B: 3. User types a ticker, hits submit<br/>setStatus("loading") called
+    Note over B: React re-renders in memory (cheap), diffs,<br/>updates only the real DOM bits that changed<br/>— still 100% inside the browser, no network yet
+
+    Note over B,A: 4. Only now does a real request happen
+    B->>A: GET /research/{job_id}
+    A-->>B: JSON data (the real report)
+
+    Note over B: 5. setStatus("done", data) called<br/>React re-renders again with real content
+```
+
+The static file server only ever hands out the same fixed shell and JS bundle — it has no idea what a ticker even is. The backend API is the only party that ever sees a real ticker or returns real data, and steps 2–3 above never touch the network at all — they're pure in-browser bookkeeping. That's the whole reason this chapter's fake `setTimeout` flow and Chapter 2's real API call could be built as two separate, sequential steps: swapping step 4 from a fake delay to a real `fetch` doesn't require touching steps 1 through 3 at all.
+
+**Why re-running the component function on every state change isn't slow.** Returning JSX doesn't touch the real page directly — it builds a small, disposable, in-memory description of what the UI *should* look like (structurally no different from building any plain JS object). The expensive operation in a browser is touching the *real* page — layout, paint, all the actual pixel work — and React's whole diffing step exists specifically to minimize that: compare the new in-memory description against the last one, and only touch the real DOM where something actually changed. Cheap recomputation happens often; expensive real writes happen only for genuine differences.
+
+**State only changes when you say so, explicitly.** The setter React hands back from `useState` (`setStatus`, `setReport`, etc.) isn't a listener watching for changes — it's a direct call straight into React's own code, the same way clicking a button directly runs its handler. There's no polling or "did anything change" detection happening quietly in the background; React only ever finds out about a change because your code explicitly called the setter. This matters concretely the moment state is an array or object rather than a primitive: `tickers.push(x)` mutates the array in place and React never finds out — the screen stays stale, silently. The fix is always to hand React a *new* array or object (`setTickers([...tickers, x])`), since that's the actual signal it's watching for, not smart change-detection.
+
+> 🏭 **Production Lens:** This app's real backend call is asynchronous and queued (Chapter 2) — the first status check after submitting can easily come back "still running." Nothing in React watches a network request for you; the app's own code has to explicitly poll (`GET /research/{job_id}` on a repeating timer) until the response says done, then stop. A higher-scale production system might instead use WebSockets or Server-Sent Events so the server *pushes* "done" the moment it's ready, rather than the browser repeatedly asking — a deliberate scope simplification here (polling is simple and entirely adequate at this project's scale), not a shortcut assumed away.
 
 ## Building the Ticker Input
 
@@ -119,6 +159,13 @@ Just one, deliberately — the whole point of building layer by layer is that ea
 One detail worth keeping, because it showed up as something concrete rather than just a definition: fetching the live URL with a tool that doesn't execute JavaScript — the same way most non-Google web crawlers behave — returned almost nothing. Just the page's `<title>` tag and an empty shell. No search box, no heading, nothing that a visitor's actual browser would show.
 
 This is the direct, visible consequence of client-side rendering: a crawler that never runs your JavaScript never sees your real content, because your real content doesn't exist until that JavaScript runs. It's not a bug in the deploy — it's exactly what CSR means, made concrete by a real tool hitting a real URL. (It's also not a problem for this particular app: a stock-research tool isn't something meant to be indexed by search engines in the first place.)
+
+Worth being precise that this is actually two separate reasons, not one, since they call for different fixes if it ever mattered:
+
+1. **A capability limit, for most crawlers.** Bing, DuckDuckGo, and social link-preview bots (Slack, Twitter unfurling a link) never execute JavaScript at all, full stop — a CSR page is *permanently* empty to them, not a timing issue that clears up if they wait longer.
+2. **A timing risk, specifically for Google.** Googlebot does run JavaScript, but as a delayed second pass — it fetches the raw HTML first, then comes back later (sometimes much later) to actually render the JS and snapshot the result. If real content depends on a slow or flaky API call, Google's eventual snapshot can capture a still-loading state rather than the finished page.
+
+Server-side rendering sidesteps both at once, since real content is present in the very first HTTP response, before any crawler-specific behavior or timing is even relevant — the actual reason SSR/Next.js exists as a meaningfully different option from plain client-side React, not just a routing convenience.
 
 ## The Architecture So Far
 
