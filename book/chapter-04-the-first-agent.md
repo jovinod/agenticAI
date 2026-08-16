@@ -302,9 +302,68 @@ Run end to end against a real ticker, the whole chain held up — real price fet
 
 This naturally raises a bigger question: what about *retrying* a failed call, not just reporting the failure honestly? That's deliberately **not** built here — it's its own dedicated later phase. This project's roadmap keeps three related-sounding concerns genuinely separate: today's fix is about *honest failure reporting* (the loop already stopped cleanly; the problem was disguising that as success). **Phase 6 (Checkpointing)** is about resuming a *crashed process* from where it left off, not restarting a whole ticker from scratch. **Phase 7 (Resilience)** is the one actually about retries — backoff around individual tool/agent calls, simulating a real failure and confirming graceful partial results instead of a crash, plus dead-letter handling for jobs that keep failing. Building real retry logic now, before there's an actual failure scenario to test it against, would be building Phase 7 early and out of context — the honest fix today is scoped to exactly what today's problem was.
 
+## The Genuine Skill: Instructions, Not a Computed Value
+
+This project owed one real, explicit thing since Phase 3: `flag_risk_factors` was honestly labeled a *plain reusable module*, not the fuller meaning that made "Skill" a notable concept in the first place — an LLM *discovering* a capability and *choosing*, with real judgment, whether to apply it. Building that properly required answering a mechanical question first: without Claude's own native Skills-loading (a harness-level feature, established two sections back), what does "discoverable" even mean in code *we* have to write ourselves?
+
+The answer: reuse the tool-calling loop already proven, but make this particular "tool" behave differently from `fetch_stock_data`. A tool computes a value. A Skill, called the same mechanical way, returns **instructions** the model then has to apply itself, using judgment, on the next turn:
+
+```python
+# skills/assess_news_sentiment/skill.py
+def load_instructions() -> str:
+    content = _SKILL_FILE.read_text()
+    _, _, body = content.split("---", 2)  # drop the YAML frontmatter, keep the instructions
+    return body.strip()
+```
+
+`SKILL.md` itself is modeled directly on `tutor/SKILL.md` — the very file steering this project — same shape: a frontmatter description used for discovery, then a body of instructions to follow with judgment, not execute as code. Its actual content is a rubric for *"assess whether recent news about a company suggests real cause for investor concern"* — explicitly listing genuine red flags (fraud allegations, an executive departing under a cloud, a material regulatory investigation) alongside routine coverage that should specifically **not** be flagged (analyst opinion pieces, ordinary competitive pressure, unconfirmed rumors) — the part doing the real work, since without it the model would default to pattern-matching on negative tone rather than genuinely weighing materiality.
+
+Registered in `agent.py` exactly like any other tool, description doing the entire discovery job:
+
+```python
+{
+    "type": "function",
+    "function": {
+        "name": "assess_news_sentiment",
+        "description": "Load guidance for judging whether recent news about a company is a genuine cause for investor concern, distinguishing real red flags from routine negative coverage. Call this before forming a final judgment about news-driven risk, ideally after searching for recent news.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+},
+```
+
+```python
+TOOL_REGISTRY = {
+    "fetch_stock_data": fetch_stock_data,
+    "search_web": search_via_mcp,
+    # The string key ("assess_news_sentiment", matching the schema's "name" --
+    # this is the tool's identity to the model) is deliberately NOT the same as
+    # the Python function name (load_news_sentiment_skill, describing what it
+    # actually does) -- collapsing those two would make it look like this
+    # function performs the assessment itself, when really it only loads
+    # instructions for one; the model does the actual assessing afterward.
+    "assess_news_sentiment": load_news_sentiment_skill,
+}
+```
+
+This went through two real revisions worth being honest about, not just presenting the final version as if it arrived this way. First pass: `"assess_news_sentiment": lambda: load_news_sentiment_skill()` — a needless lambda, since `load_instructions()` already takes zero arguments and `_call_tool` always calls with `**{}` for a schema with no parameters; simplified to register the function directly. Second pass, after that simplification renamed the import alias to `assess_news_sentiment` purely to match the dict key visually: that turned out to be a real naming mistake, not a style choice — it made a Python identifier that only *loads instructions* read like one that *performs the assessment*, colliding the tool's model-facing identity with a function name that should describe its own behavior instead. Restored to `load_news_sentiment_skill` for exactly that reason.
+
+**A question worth asking explicitly, since the answer is the actual point of this whole design**: if calling this "tool" doesn't compute anything, why route it through a tool call at all, instead of just always including the rubric in the system prompt? Because that would remove the one thing that actually matters here — **the model's own choice**. Pasting the rubric into every prompt unconditionally means the model reads it whether it's relevant or not; that's not "the LLM discovers and chooses to apply it," it's just... more prompt. Routing it through a tool call, with a description the model reads among its other options, is what preserves genuine discretion — the same discretion visible in the non-determinism below, where the model chose differently on identical prompts.
+
+**A related question: could this skill need to invoke tools itself?** Not this one — `load_instructions()` is purely passive, a file read with no way to call anything else. The sequencing that makes it useful (search first, *then* apply the rubric to what was found) is handled entirely by the model's own loop across separate turns, not by the skill orchestrating anything. That's a deliberate choice, not the only possible one: a skill's own `skill.py` is just a Python module, and `project-structure.md` already anticipated skills bundling "prompt/instructions + any code it needs" — a more complex skill later could directly call other tool functions from inside its own code rather than trusting the model to sequence things correctly. This one didn't need that, so it doesn't have it.
+
+Wiring this in had a real consequence: to apply the skill at all, the model needs actual news text in front of it, which meant Chapter 3's dormant `search_web` (`search_via_mcp`) finally got activated — exactly the trigger Chapter 3 said it was waiting for. That also meant `run_agent` had to become genuinely `async`, since `search_web` is a real coroutine; `_call_tool` now branches on `inspect.iscoroutinefunction` to await async tools and call sync ones directly, so `fetch_stock_data` and `search_web` share one dispatch path without either being special-cased.
+
+**What actually happened running it — genuinely instructive, not just successful.** With the prompt asking for "current price *and outlook*," one run called only `fetch_stock_data` and explicitly asked the user before searching further. An identical second run called `fetch_stock_data` **and** `search_web` (query: `"AAPL stock outlook"`), used the real analyst price targets and earnings data it found, and correctly did **not** call `assess_news_sentiment` — because what it found (analyst targets, earnings commentary) wasn't the shape of content the skill is built to judge. Same prompt, two different reasonable choices about whether to search — genuine non-determinism, not a bug — and two tools with genuinely distinct jobs (`search_web` answers "do I need more information"; `assess_news_sentiment` answers a narrower "does what I found rise to a genuine red flag") behaving correctly as separate decisions even while the first decision varied.
+
+A third model-reasoning slip also surfaced testing this, worth adding to the running list from earlier in this chapter: a real market cap of `4464797286400` (**$4.46 trillion**) got reported back as **"$446.5 trillion"** — a 100x unit-scaling error during synthesis, not a data-fetch error. Three separate first-hand examples now, across two different sessions, of the same small local model handling real, correctly-fetched numbers incorrectly once it has to reason about or reformat them.
+
+**One deliberate scoping decision, worth recording as such.** After seeing search get triggered by "outlook," the user prompt was narrowed back to price-only (`"What's the current price of {ticker}..."`) for now — not because search or the skill are broken, but because tuning exactly how eagerly the agent should reach for them is a decision worth making once against Azure AI Foundry's actual behavior, not blind against a small local model's particular quirks. `search_web` and `assess_news_sentiment` stay fully registered and genuinely available either way — only the task framing changed, not the toolset.
+
+> 🏭 **Production Lens:** Seeing the *same* prompt produce two different, both-defensible tool-use decisions across runs is a real, first-hand look at something abstract until you've watched it happen: a genuinely agentic system's behavior is not fully deterministic, even with identical input. A production system has to be designed with that in mind — logging what was actually called and why (Phase 10, Observability), rather than assuming one test run's behavior predicts every future run's.
+
 ## Where Phase 4 Actually Stands
 
-What's proven, concretely: a real model, given a real tool schema, makes a genuine decision; that decision is dispatched correctly by name, not assumption; a real function runs; a real result is fed back; a real, grounded final answer comes out the other side; a real Context Assembler now owns what goes into every call rather than that being scattered inline; and a real bounded agent loop — not a fixed two-turn script, and now with a typed, honest result rather than a disguised give-up string — ties it all together against real tools, with one honest, first-hand example of where the model's own reasoning can still go wrong even with correct data in hand. Still ahead: the genuine LLM-discoverable Skill this phase is committed to building (one requiring real interpretive judgment, unlike Chapter 3's fixed-rule `flag_risk_factors`), and the eventual swap from local Ollama to Azure AI Foundry with token/cost logging — followed by, as always in this project, an actual deploy and a live check before the phase is called done.
+What's proven, concretely: a real model, given real tool schemas, makes genuine decisions — including, now, a real choice between a data-fetching tool, a search tool, and a Skill offering interpretive guidance rather than a computed value; every decision dispatches correctly by name; real functions and a real MCP-backed search run; a real Context Assembler owns what goes into every call; and a real bounded agent loop, now properly async, ties it all together with a typed, honest result rather than a disguised give-up string. The one genuine LLM-discoverable Skill this phase explicitly committed to is built, wired in, and demonstrated making a real, correctly-scoped judgment call. Still ahead: the swap from local Ollama to Azure AI Foundry with token/cost logging, and the first live deploy — followed by, as always in this project, an actual verification that it works on real infrastructure, not just locally.
 
 ## Azure Components Used This Chapter
 
@@ -344,5 +403,6 @@ flowchart TB
 - A dispatch mechanism that scales to more than one tool — matching by the name the model actually returned, not by which function happened to be hardcoded — with an honest account of what it does and doesn't protect against.
 - A precise, working distinction between a harness (everything needed to let one agent act) and an orchestrator (deciding which of several agents runs when, itself calling into the same harness machinery rather than reimplementing it) — and a name for what's still missing from this chapter's own harness so far: a Context Assembler and Skill discovery.
 - A real Context Assembler, a swappable model-client function, and a genuine bounded agent loop (not a fixed script) — all proven standalone first, then together, against a real ticker.
-- First-hand, not theoretical, evidence for why a deterministic Skill and an LLM's own synthesis are complements, not duplicates: the same real data, correctly fetched, that the model misjudged ("near its low" when it wasn't) is exactly what a fixed-rule calculation can't get wrong.
-- Phase 4 still open: the genuine LLM-discoverable Skill, the Azure AI Foundry swap with token/cost logging, and the first live deploy of any of it are what's left before this chapter's story is actually finished.
+- First-hand, not theoretical, evidence for why a deterministic Skill and an LLM's own synthesis are complements, not duplicates: the same real data, correctly fetched, that the model misjudged ("near its low" when it wasn't, "$446.5 trillion" when it wasn't) is exactly what a fixed-rule calculation can't get wrong.
+- The genuine LLM-discoverable Skill this phase explicitly committed to, built and proven: a "tool" that returns instructions instead of a computed value, correctly discovered and correctly scoped by the model across real, observably non-deterministic runs — concrete, not theoretical, understanding of what makes a Skill different from a tool.
+- Phase 4 still open: the Azure AI Foundry swap with token/cost logging, and the first live deploy of any of it are what's left before this chapter's story is actually finished.
