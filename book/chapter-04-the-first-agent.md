@@ -1,6 +1,6 @@
 # Chapter 4 — The First Agent
 
-*Phase 4 is still in progress. This chapter covers what's been proven so far — the actual mechanism a model uses to decide "call this function" and get a real answer back — not yet the finished agent wired into the worker.*
+*Phase 4 is complete — deployed and verified live. This chapter covers the actual mechanism a model uses to decide "call this function" and get a real answer back, built up in isolation first, then wired into the real worker and confirmed working on real Azure infrastructure.*
 
 ## The Question Chapter 3 Left Open
 
@@ -401,17 +401,43 @@ This wasn't an arbitrary call — it followed directly from what this exact sess
 
 Verified locally end to end: a real `TickerJob` row for AAPL/US came back with the deterministic summary *and* the AI summary concatenated together, and a real `TokenUsage` row landed alongside it — `gpt-5-mini`, 789 prompt tokens, 201 completion tokens, an estimated `$0.000398`.
 
+## Deploying It — Two Gotchas, Neither in the Application Code
+
+Getting the new code onto the real worker started with a genuinely unwelcome discovery: the Azure Postgres admin password wasn't recoverable. This traces back to a scratchpad reset flagged honestly back in Phase 3 as a known gap — most secrets were re-fetchable at the time, but the Postgres password wasn't needed again until now, when the new `TokenUsage` table needed creating on the real database. The fix was a real password reset (`az postgres flexible-server update --admin-password`) — which meant immediately updating the `database-url` secret on **both** `alpha-api` and `alpha-worker`, since the old password was embedded in both, not just the one being redeployed. `alpha-api` wasn't otherwise being touched today, so it needed an explicit `az containerapp revision restart` to actually pick up the new secret — confirmed healthy (`200` on its root endpoint) before moving on, rather than assumed.
+
+Right after that, a second, smaller gotcha: connecting to the newly-repasswordad database timed out rather than erroring cleanly. The cause — this machine's public IP had changed since the Postgres firewall's `allow-my-ip` rule was created. A real, easy-to-miss category of problem with any IP-allowlist firewall rule on a non-static connection: the rule doesn't become wrong loudly, it just silently stops matching. Fixed by checking the current IP directly (`curl https://api.ipify.org`) and updating the rule to match.
+
+With those cleared: `requests` got promoted from an implicit transitive dependency to an explicit one (`uv add requests`) — `model_client.py` imports it directly now, and relying on some other dependency happening to pull it in was fragile, not really a dependency at all in any sense the project should rely on. The worker image was rebuilt (`--platform linux/amd64`, the same Apple-Silicon-building-for-x86 gotcha from Chapter 2) and deployed with `--revision-suffix`, the standing discipline since the stale-`:latest` incident. Both revisions briefly showed as active during the transition — the same pattern seen once before — and resolved on its own; verifying that turned into its own small lesson, since a first polling script waited for the old revision's replica count to hit exactly `"0"` and hung, because Azure had actually removed the old revision from the list entirely rather than leaving it at zero. A script bug on this session's part, not a deploy problem, but worth remembering: "gone" and "at zero" aren't always the same signal to poll for.
+
+## Live Verification
+
+A real job, submitted the same way a real user would — `POST /research` against the live API, ticker `MSFT`:
+
+```json
+{
+  "status": "done",
+  "result": {
+    "tickers": ["MSFT"],
+    "summary": [
+      "MSFT: USD 495.4, P/E 27.62967, 52w range 349.2-553.72 | AI summary: The latest available US quote for MSFT is $495.40 USD per share."
+    ]
+  }
+}
+```
+
+Both halves of the hybrid design are visible in that one line — the deterministic summary (price, P/E, 52-week range, computed the same way since Chapter 3) and the agent's own "AI summary" addition, genuinely produced by the live Azure OpenAI deployment, not a local model. And checked directly against the real Azure Postgres, not inferred: a `TokenUsage` row for that exact `job_id` — `gpt-5-mini`, 789 prompt tokens, 185 completion tokens, an estimated `$0.000382`. Real infrastructure, real model, real cost, real report — the same "verify actual behavior, not a green checkmark" standard every prior phase's deploy was held to.
+
 ## Where Phase 4 Actually Stands
 
-Everything is now proven, together, locally: a real Foundry-hosted model makes genuine tool-use decisions; a Context Assembler, a swappable model client, and a bounded async loop carry them out; the one genuine LLM-discoverable Skill this phase committed to works correctly alongside a real search tool; deterministic and LLM-driven synthesis run side by side rather than one replacing the other; and every real call's cost lands in Postgres. Local build is functionally complete — the only thing left is what closes every phase in this project: an actual deploy, and a live check that it's genuinely working on real infrastructure, not just on this machine.
+Complete, and genuinely verified live, not just built locally: a real Foundry-hosted model makes genuine tool-use decisions on the real deployed worker; a Context Assembler, a swappable model client, and a bounded async loop carry them out; the one genuine LLM-discoverable Skill this phase committed to works correctly alongside a real search tool; deterministic and LLM-driven synthesis run side by side in the actual live report rather than one replacing the other; and every real call's cost lands in the real Azure Postgres. Phase 5 — multiple agents, real Skills-folder discovery, real three-tier memory — is next.
 
 ## Azure Components Used This Chapter
 
-**Azure AI Foundry (Azure OpenAI)** — `alpha-research-openai`, South India (the nearest region actually offering it; Central India, where the rest of `alpha-rg` lives, doesn't). One model deployed: `gpt-5-mini`, `GlobalStandard` SKU, capacity 10 (10K tokens/minute) — chosen not because it was the original plan (`gpt-4o-mini` turned out to be deprecating, its replacement had zero available quota) but because it's what this subscription actually had real, usable quota for. Provisioned and proven callable from this machine; not yet called by the *deployed* worker, since that container hasn't been rebuilt and redeployed yet.
+**Azure AI Foundry (Azure OpenAI)** — `alpha-research-openai`, South India (the nearest region actually offering it; Central India, where the rest of `alpha-rg` lives, doesn't). One model deployed: `gpt-5-mini`, `GlobalStandard` SKU, capacity 10 (10K tokens/minute) — chosen not because it was the original plan (`gpt-4o-mini` turned out to be deprecating, its replacement had zero available quota) but because it's what this subscription actually had real, usable quota for. Now genuinely called by the live, deployed worker on every real research job.
 
 ## The Architecture So Far
 
-One new node this chapter — `alpha-research-openai` — but deliberately no edge to `Worker` yet. The resource is real and live in Azure; the deployed worker container simply doesn't have this code in it yet. That edge appears once the actual deploy happens, not before.
+One new node this chapter — `alpha-research-openai` — and, now that the deploy is genuinely live and verified, a real edge from `Worker` to it.
 
 ```mermaid
 flowchart TB
@@ -420,7 +446,7 @@ flowchart TB
     API["Container App: alpha-api<br/>FastAPI (external ingress)"]
     SB["Service Bus: alpharesearchsb<br/>queue: research-jobs"]
     Worker["Container App: alpha-worker<br/>(no ingress, min 1 replica)"]
-    PG[("Postgres Flexible Server:<br/>alpha-research-pg")]
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ token_usage table")]
     Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
     OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — deployment: gpt-5-mini"]
 
@@ -429,9 +455,10 @@ flowchart TB
     API -->|send job, per ticker on miss| SB
     SB -->|deliver job| Worker
     API -->|read status| PG
-    Worker -->|write status/result| PG
+    Worker -->|write status/result/token-cost| PG
     API -->|cache check| Redis
     Worker -->|cache write| Redis
+    Worker -->|tool-calling + token/cost logging| OpenAI
 
     classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
     classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
@@ -439,7 +466,7 @@ flowchart TB
     class OpenAI new
 ```
 
-## What Came Out of This Chapter (So Far)
+## What Came Out of This Chapter
 
 - A real, working proof of the full tool-calling loop against a real model: decide → execute for real → feed the real result back → genuine grounded answer.
 - A concrete, working understanding of what a "reasoning model's scratchpad" is, and that carrying it forward between turns is a design decision, not something the protocol hands you for free.
@@ -451,4 +478,5 @@ flowchart TB
 - A real Azure AI Foundry deployment, provisioned through two genuine, unpredictable gotchas (a deprecating model, a zero-quota replacement) resolved by querying the subscription's actual state rather than assuming — and a real backend swap proving `model_client.py`'s whole design worked, with one real cross-provider incompatibility (stringified vs. dict-shaped tool arguments) caught and fixed in exactly the one file meant to absorb that kind of thing.
 - Real token/cost tracking, end to end — a deliberate interface change surfacing genuine per-call usage and an (explicitly unverified) estimated cost, landing in its own Postgres table on every real call, success or not.
 - A deliberate, evidence-backed decision to run deterministic checks and LLM synthesis side by side in the deployed report rather than letting one replace the other — not a hedge, a direct, lived consequence of watching this exact model class get real numbers wrong three separate times this session.
-- Phase 4's local build is functionally complete. The first live deploy — and the actual verification that any of this works on real infrastructure, not just this machine — is what's left before this chapter's story is finished.
+- Two more real deploy-time gotchas resolved by checking actual state rather than assuming: an unrecoverable admin password (a debt from an earlier scratchpad reset, finally coming due) and a firewall rule silently invalidated by a changed IP address, neither one loud until actually tested against.
+- **Phase 4 deployed and verified live**: a real job submitted through the real API, a real Foundry-generated summary sitting alongside the deterministic one in the same report, and a real `TokenUsage` row confirmed directly in Azure Postgres — the same "verify actual behavior, not a green checkmark" bar every phase before this one was held to. This chapter's story is finished; Phase 5 — multiple agents, real Skills-folder discovery, real three-tier memory — is next.

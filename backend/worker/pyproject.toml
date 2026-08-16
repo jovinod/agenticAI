@@ -10,6 +10,7 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "python-dotenv>=1.2.2",
     "redis>=8.1.0",
+    "requests>=2.34.2",
     "sqlmodel>=0.0.39",
     "tavily-python>=0.7.27",
     "yfinance>=1.5.2",
