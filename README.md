@@ -57,6 +57,7 @@ flowchart TD
         PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha")]
         Redis[("Managed Redis:\nalpha-research-cache\nport 10000, TLS, key auth")]
         LAW["Log Analytics workspace:\nworkspace-alphargK2N9\n(auto-created by alpha-env)"]
+        OpenAI["Azure OpenAI: alpha-research-openai (South India)\ndeployment: gpt-5-mini"]
     end
 
     User -->|HTTPS| Frontend
@@ -70,6 +71,8 @@ flowchart TD
     ENV -.->|pulls images| ACR
     ENV -.->|logs/metrics| LAW
 ```
+
+`alpha-research-openai` is provisioned but not yet called by `Worker` — that wiring (`llm/model_client.py`) is the next step, at which point this diagram gets a real edge between them, not before.
 
 ## Live URLs
 

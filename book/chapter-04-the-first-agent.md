@@ -361,17 +361,57 @@ A third model-reasoning slip also surfaced testing this, worth adding to the run
 
 > 🏭 **Production Lens:** Seeing the *same* prompt produce two different, both-defensible tool-use decisions across runs is a real, first-hand look at something abstract until you've watched it happen: a genuinely agentic system's behavior is not fully deterministic, even with identical input. A production system has to be designed with that in mind — logging what was actually called and why (Phase 10, Observability), rather than assuming one test run's behavior predicts every future run's.
 
+## The Foundry Swap: Two Provisioning Gotchas Before Any Code Changed
+
+Deploying a real model started with a region constraint the rest of this project hadn't hit yet: Azure OpenAI/AI Foundry isn't available in Central India, where every other `alpha-rg` resource lives — confirmed directly via `az cognitiveservices model list` rather than assumed. **South India** was the closest real option, a genuine cross-region tradeoff, same category as Static Web Apps landing in East Asia back in Chapter 1.
+
+Then two real gotchas hit *before* any application code changed at all. First: the originally planned `gpt-4o-mini` turned out to be in a `Deprecating` lifecycle state — Azure outright refuses new deployments on it, invisible without querying the model catalog directly. Its natural current replacement, `gpt-5.4-mini`, was `GenerallyAvailable` but this subscription had **zero quota** allocated for it in South India (`InsufficientQuota`, limit 0) — newer, premium-tier models don't inherit the default quota older ones get. Resolved by checking `az cognitiveservices usage list` for a model with real, already-granted quota: **`gpt-5-mini`**, 500K tokens/minute available, deployed successfully. Neither gotcha was guessable in advance; both only surfaced by querying the subscription's actual real state, the same discipline this project has leaned on since the Redis-port and stale-`:latest` incidents.
+
+## The Swap Itself — and the One Real Incompatibility It Exposed
+
+This is the moment `llm/model_client.py`'s whole design was built for: swapping backends meant changing what's *inside* `chat()` and nothing else. `agent.py`, `context_assembler.py`, every tool — completely untouched.
+
+But the swap wasn't friction-free, and the friction it did hit is genuinely instructive. Azure's API expects `tool_calls[i]['function']['arguments']` as a **JSON-encoded string** on the wire — Ollama had always handed it over as a real dict. The first version of the swap parsed the *incoming* response into a dict (needed, since `agent.py`'s `**function_args` requires one) but then let that same dict-shaped message get resent as conversation history on the next turn — Azure rejected it outright with `400 Bad Request`. The fix, `_stringify_tool_call_args()`, builds a fresh copy of the outgoing messages with arguments re-stringified only for the request over the wire, never touching `history` itself — so the dict form stays canonical everywhere in the codebase that isn't this one function talking to the network. A concrete, first-hand example of something easy to state abstractly and easy to miss in practice: two providers' "OpenAI-compatible" tool-calling formats can still disagree on a real detail, and the fix belongs entirely inside the one file whose whole job is hiding exactly that kind of thing.
+
+One more real difference, no bug involved: `gpt-5-mini`'s answers came back noticeably terser than `qwen3:8b`'s ever did — asked only for a price, it reported only the price, where the local model had reliably padded every answer with P/E and market cap whether asked for or not. Just a real behavioral difference between models, worth noticing rather than a defect in either.
+
+## Token/Cost Logging — A Deliberate Interface Change, Not a Bolt-On
+
+`phases.md` explicitly required tracking real token usage and estimated cost per call. Azure's response includes a genuine `usage` block already; `chat()` was simply discarding it. Fixing that meant changing `chat()`'s return contract from "just the message" to `{"message": ..., "usage": {...}}` — a deliberate change touching every call site, not a side-channel bolted on:
+
+```python
+raw_usage = body.get("usage", {})
+prompt_tokens = raw_usage.get("prompt_tokens", 0)
+completion_tokens = raw_usage.get("completion_tokens", 0)
+estimated_cost_usd = (
+    prompt_tokens / 1000 * PRICE_PER_1K_PROMPT_TOKENS
+    + completion_tokens / 1000 * PRICE_PER_1K_COMPLETION_TOKENS
+)
+```
+
+Cost estimation lives in `model_client.py`, not `agent.py` — this is the one file that actually knows which model answered, so it's the right place to know what that model costs. The per-1K-token rates are explicitly labeled placeholders, not sourced from a live pricing page — good enough to prove the *mechanism* works end to end, honest about not being verified for real budgeting.
+
+`run_agent` accumulates usage across **every** turn of its loop, not just the final one — a run that calls the model three times before answering genuinely costs three calls' worth. A new `TokenUsage` table holds it, deliberately **not** duplicated into `backend/api/models.py` the way `TickerJob` was: `TickerJob` needed duplication because both the API and worker genuinely read and write it; `TokenUsage` is worker-only; end to end.
+
+## Wiring It Into the Worker — Deterministic and LLM Synthesis, Side by Side
+
+One real design fork came up before touching `worker.py`: `process_ticker` already calls `fetch_stock_data` and `flag_risk_factors` directly, deterministically, no LLM involved — and `run_agent` calls `fetch_stock_data` too, as one of its own tools. Full replacement (drop the deterministic path, let the agent's own narrative *be* the report) was one option. The one actually chosen: **keep both**, side by side — the deterministic risk flags stay exactly as Chapter 3 built them, and the agent's answer gets appended as an `"AI summary: ..."` addition to the same report line.
+
+This wasn't an arbitrary call — it followed directly from what this exact session had already demonstrated three separate times: the same small model class mangling correctly-fetched numbers during synthesis (the range-position mixups, the 100x market-cap scaling error). A deterministic threshold check can't misjudge which end of a range a number sits in; an LLM's free-form reasoning demonstrably can. Keeping both isn't hedging — it's the concrete, lived reason this project drew that distinction back in Chapter 3, now actually acted on. The one accepted cost: `fetch_stock_data` runs twice per ticker, once directly and once inside the agent's own loop — real, but cheap and local, not worth restructuring the agent's prompt to avoid right now.
+
+Verified locally end to end: a real `TickerJob` row for AAPL/US came back with the deterministic summary *and* the AI summary concatenated together, and a real `TokenUsage` row landed alongside it — `gpt-5-mini`, 789 prompt tokens, 201 completion tokens, an estimated `$0.000398`.
+
 ## Where Phase 4 Actually Stands
 
-What's proven, concretely: a real model, given real tool schemas, makes genuine decisions — including, now, a real choice between a data-fetching tool, a search tool, and a Skill offering interpretive guidance rather than a computed value; every decision dispatches correctly by name; real functions and a real MCP-backed search run; a real Context Assembler owns what goes into every call; and a real bounded agent loop, now properly async, ties it all together with a typed, honest result rather than a disguised give-up string. The one genuine LLM-discoverable Skill this phase explicitly committed to is built, wired in, and demonstrated making a real, correctly-scoped judgment call. Still ahead: the swap from local Ollama to Azure AI Foundry with token/cost logging, and the first live deploy — followed by, as always in this project, an actual verification that it works on real infrastructure, not just locally.
+Everything is now proven, together, locally: a real Foundry-hosted model makes genuine tool-use decisions; a Context Assembler, a swappable model client, and a bounded async loop carry them out; the one genuine LLM-discoverable Skill this phase committed to works correctly alongside a real search tool; deterministic and LLM-driven synthesis run side by side rather than one replacing the other; and every real call's cost lands in Postgres. Local build is functionally complete — the only thing left is what closes every phase in this project: an actual deploy, and a live check that it's genuinely working on real infrastructure, not just on this machine.
 
 ## Azure Components Used This Chapter
 
-None yet. This chapter's work was deliberately local-only — proving a mechanism doesn't need cloud infrastructure, and standing up Azure AI Foundry before the mechanism itself was understood would have made a straightforward learning step needlessly complicated. That's next, not yet done.
+**Azure AI Foundry (Azure OpenAI)** — `alpha-research-openai`, South India (the nearest region actually offering it; Central India, where the rest of `alpha-rg` lives, doesn't). One model deployed: `gpt-5-mini`, `GlobalStandard` SKU, capacity 10 (10K tokens/minute) — chosen not because it was the original plan (`gpt-4o-mini` turned out to be deprecating, its replacement had zero available quota) but because it's what this subscription actually had real, usable quota for. Provisioned and proven callable from this machine; not yet called by the *deployed* worker, since that container hasn't been rebuilt and redeployed yet.
 
 ## The Architecture So Far
 
-Unchanged from Chapter 3 — nothing new has been deployed to Azure this phase, since the work so far has been proving the tool-calling mechanism locally against Ollama, not standing up new infrastructure.
+One new node this chapter — `alpha-research-openai` — but deliberately no edge to `Worker` yet. The resource is real and live in Azure; the deployed worker container simply doesn't have this code in it yet. That edge appears once the actual deploy happens, not before.
 
 ```mermaid
 flowchart TB
@@ -382,6 +422,7 @@ flowchart TB
     Worker["Container App: alpha-worker<br/>(no ingress, min 1 replica)"]
     PG[("Postgres Flexible Server:<br/>alpha-research-pg")]
     Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — deployment: gpt-5-mini"]
 
     User --> SWA
     SWA -->|HTTPS| API
@@ -393,7 +434,9 @@ flowchart TB
     Worker -->|cache write| Redis
 
     classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
     class SWA,API,SB,Worker,PG,Redis existing
+    class OpenAI new
 ```
 
 ## What Came Out of This Chapter (So Far)
@@ -405,4 +448,7 @@ flowchart TB
 - A real Context Assembler, a swappable model-client function, and a genuine bounded agent loop (not a fixed script) — all proven standalone first, then together, against a real ticker.
 - First-hand, not theoretical, evidence for why a deterministic Skill and an LLM's own synthesis are complements, not duplicates: the same real data, correctly fetched, that the model misjudged ("near its low" when it wasn't, "$446.5 trillion" when it wasn't) is exactly what a fixed-rule calculation can't get wrong.
 - The genuine LLM-discoverable Skill this phase explicitly committed to, built and proven: a "tool" that returns instructions instead of a computed value, correctly discovered and correctly scoped by the model across real, observably non-deterministic runs — concrete, not theoretical, understanding of what makes a Skill different from a tool.
-- Phase 4 still open: the Azure AI Foundry swap with token/cost logging, and the first live deploy of any of it are what's left before this chapter's story is actually finished.
+- A real Azure AI Foundry deployment, provisioned through two genuine, unpredictable gotchas (a deprecating model, a zero-quota replacement) resolved by querying the subscription's actual state rather than assuming — and a real backend swap proving `model_client.py`'s whole design worked, with one real cross-provider incompatibility (stringified vs. dict-shaped tool arguments) caught and fixed in exactly the one file meant to absorb that kind of thing.
+- Real token/cost tracking, end to end — a deliberate interface change surfacing genuine per-call usage and an (explicitly unverified) estimated cost, landing in its own Postgres table on every real call, success or not.
+- A deliberate, evidence-backed decision to run deterministic checks and LLM synthesis side by side in the deployed report rather than letting one replace the other — not a hedge, a direct, lived consequence of watching this exact model class get real numbers wrong three separate times this session.
+- Phase 4's local build is functionally complete. The first live deploy — and the actual verification that any of this works on real infrastructure, not just this machine — is what's left before this chapter's story is finished.

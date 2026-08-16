@@ -25,8 +25,12 @@ messages = [{"role": "user", "content": "What's the current price of Apple stock
 result = chat(messages, [TOOL_SCHEMA])
 
 print("Message returned by chat():")
-print(result)
+print(result["message"])
+print("\nUsage returned by chat():")
+print(result["usage"])
 
-assert result["role"] == "assistant"
-assert result["tool_calls"][0]["function"]["name"] == "fetch_stock_data"
+assert result["message"]["role"] == "assistant"
+assert result["message"]["tool_calls"][0]["function"]["name"] == "fetch_stock_data"
+assert result["usage"]["prompt_tokens"] > 0
+assert result["usage"]["estimated_cost_usd"] >= 0
 print("\nAll checks passed.")

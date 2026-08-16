@@ -6,9 +6,11 @@ from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
-from models import TickerJob
+from models import TickerJob, TokenUsage
 from tools.stock_data import fetch_stock_data
 from skills.flag_risk_factors.flag_risk_factors import flag_risk_factors
+from agent import run_agent
+from llm.model_client import AZURE_OPENAI_DEPLOYMENT
 
 # No-op in Azure (no .env.local file there) — Container Apps sets real env vars directly.
 # Doesn't override an already-set env var, so an explicit shell export still wins if used.
@@ -67,6 +69,27 @@ async def process_ticker(job_id: str, ticker: str, market: str):
         flags = flag_risk_factors(data)
         if flags:
             summary_line += " | Risk flags: " + "; ".join(flags)
+
+        # LLM synthesis layer -- complements the deterministic checks above,
+        # doesn't replace them. fetch_stock_data does get called a second time
+        # here (once directly above, once inside the agent's own tool loop) --
+        # known, accepted duplication, cheap since it's a local yfinance call.
+        agent_result = await run_agent(ticker, market)
+        if agent_result["status"] == "success":
+            summary_line += " | AI summary: " + agent_result["answer"]
+
+        usage = agent_result["usage"]
+        with Session(engine) as session:
+            session.add(TokenUsage(
+                job_id=job_id,
+                ticker=ticker,
+                model=AZURE_OPENAI_DEPLOYMENT,
+                prompt_tokens=usage["prompt_tokens"],
+                completion_tokens=usage["completion_tokens"],
+                total_tokens=usage["total_tokens"],
+                estimated_cost_usd=usage["estimated_cost_usd"],
+            ))
+            session.commit()
     print(f"{ticker} done.")
 
     result = {"tickers": [ticker], "summary": [summary_line]}
