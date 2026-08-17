@@ -7,9 +7,7 @@ from azure.servicebus.aio import ServiceBusClient
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from models import TickerJob, TokenUsage
-from tools.stock_data import fetch_stock_data
-from skills.flag_risk_factors.flag_risk_factors import flag_risk_factors
-from agent import run_agent
+from agents.graph import run_research
 from llm.model_client import AZURE_OPENAI_DEPLOYMENT
 
 # No-op in Azure (no .env.local file there) — Container Apps sets real env vars directly.
@@ -54,31 +52,26 @@ async def process_ticker(job_id: str, ticker: str, market: str):
         session.commit()
 
     print(f"Processing {ticker} ({market}) for job {job_id}...")
-    # Real data now — direct API call, no MCP/LLM involved (see tools/stock_data.py docstring).
-    data = fetch_stock_data(ticker, market)
+    # The full multi-agent graph -- Fundamentals/Technical/News run in parallel,
+    # Risk (deterministic flag_risk_factors + cross-signal judgment) waits for
+    # all three, Synthesizer runs last. No separate direct calls here anymore --
+    # the graph's own Fundamentals/Risk agents already do that internally.
+    graph_result = await run_research(ticker, market)
+    data = graph_result.get("fundamentals_data", {})
 
-    if "error" in data:
-        summary_line = data["error"]
+    if not data or "error" in data:
+        summary_line = data.get("error", f"{ticker}: fundamentals data unavailable")
     else:
         summary_line = (
             f"{ticker}: {data['currency']} {data['price']}, "
             f"P/E {data['pe_ratio']}, 52w range {data['fifty_two_week_low']}-{data['fifty_two_week_high']}"
         )
-        # Skill — reusable capability module, not an LLM decision or a direct
-        # data-source call (see tools/web_search.py docstring for that distinction).
-        flags = flag_risk_factors(data)
+        flags = graph_result.get("risk_flags", [])
         if flags:
             summary_line += " | Risk flags: " + "; ".join(flags)
+        summary_line += " | Report: " + graph_result.get("final_report", "")
 
-        # LLM synthesis layer -- complements the deterministic checks above,
-        # doesn't replace them. fetch_stock_data does get called a second time
-        # here (once directly above, once inside the agent's own tool loop) --
-        # known, accepted duplication, cheap since it's a local yfinance call.
-        agent_result = await run_agent(ticker, market)
-        if agent_result["status"] == "success":
-            summary_line += " | AI summary: " + agent_result["answer"]
-
-        usage = agent_result["usage"]
+        usage = graph_result["total_usage"]
         with Session(engine) as session:
             session.add(TokenUsage(
                 job_id=job_id,

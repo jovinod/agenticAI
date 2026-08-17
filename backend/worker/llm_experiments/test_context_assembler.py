@@ -18,11 +18,11 @@ fake_history = [
     {"role": "tool", "tool_call_id": "call_1", "content": json.dumps({"price": 305.93})},
 ]
 
-result = assemble_context(fake_history)
+result = assemble_context(fake_history, system_prompt="You are a stock research assistant.")
 
 print(json.dumps(result, indent=2))
 
-assert result[0] == {"role": "system", "content": result[0]["content"]}, "system prompt should be first"
+assert result[0] == {"role": "system", "content": "You are a stock research assistant."}, "system prompt should be first"
 assert "thinking" not in result[2], "thinking should be stripped from the assistant message"
 assert result[2]["tool_calls"] == fake_history[1]["tool_calls"], "tool_calls should survive stripping"
 assert result[1] == fake_history[0], "plain user message should pass through unchanged"
