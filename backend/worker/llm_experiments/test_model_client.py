@@ -2,7 +2,10 @@
 Isolation test for llm/model_client.py -- confirms the extracted chat()
 function behaves identically to the raw requests.post() calls used directly
 in test_tool_loop.py, now that it's been pulled out into its own module.
+chat() is async now (Phase 5 -- see model_client.py's own docstring for why),
+so this needs an event loop to run in.
 """
+import asyncio
 from llm.model_client import chat
 
 TOOL_SCHEMA = {
@@ -22,7 +25,7 @@ TOOL_SCHEMA = {
 }
 
 messages = [{"role": "user", "content": "What's the current price of Apple stock?"}]
-result = chat(messages, [TOOL_SCHEMA])
+result = asyncio.run(chat(messages, [TOOL_SCHEMA]))
 
 print("Message returned by chat():")
 print(result["message"])

@@ -6,10 +6,19 @@ context_assembler.py, and every tool are completely untouched by this swap.
 
 Azure's response shape isn't identical to Ollama's -- normalized below so the
 rest of the codebase never has to know which backend is actually behind this.
+
+Phase 5: was `requests.post()`, a synchronous, blocking call -- meaning
+`chat()`, despite every caller being `async def`, silently froze the whole
+event loop while waiting for a response. Real, measured consequence: three
+"parallel" agent branches in agents/graph.py ran almost fully sequentially
+(45s wall-clock, close to the SUM of each agent's own time, not the max).
+httpx.AsyncClient actually yields control during the network wait, letting
+other coroutines run -- this is what real concurrency in this codebase
+depends on, not just wiring parallel edges in a graph.
 """
 import json
 import os
-import requests
+import httpx
 from dotenv import load_dotenv
 
 # No-op in Azure (no .env.local there) -- Container Apps sets real env vars
@@ -54,18 +63,32 @@ def _stringify_tool_call_args(messages: list[dict]) -> list[dict]:
     return prepared
 
 
-def chat(messages: list[dict], tools: list[dict]) -> dict:
+async def chat(messages: list[dict], tools: list[dict]) -> dict:
     """Send messages + tool schemas to the model. Returns {"message": ...,
     "usage": {...}} -- message in the SAME shape Ollama returned it
     (tool_calls[i]['function']['arguments'] as a real dict, since that's what
     agent.py's `**function_args` expects); usage carries real token counts
     plus an estimated cost, computed here since this is the one file that
-    actually knows which model/deployment answered."""
-    response = requests.post(
-        CHAT_URL,
-        headers={"api-key": AZURE_OPENAI_KEY, "Content-Type": "application/json"},
-        json={"messages": _stringify_tool_call_args(messages), "tools": tools},
-    )
+    actually knows which model/deployment answered.
+
+    A fresh httpx.AsyncClient per call, not a persistent shared one -- simpler,
+    and correct for fixing the concurrency bug this was written to fix. A
+    persistent client (reused across calls, same reasoning as the Service Bus
+    sender in backend/api/main.py) is a further optimization, not required to
+    get real parallel agents working.
+
+    Explicit timeout -- httpx defaults to 5s, far too short for an LLM
+    completion (requests, used before, had no default timeout at all, so this
+    never came up until switching). Genuinely mattered here: running three
+    agents concurrently means they're competing for the same rate-limited
+    Azure OpenAI capacity, so responses can legitimately take longer under
+    real concurrent load than they did one at a time."""
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(
+            CHAT_URL,
+            headers={"api-key": AZURE_OPENAI_KEY, "Content-Type": "application/json"},
+            json={"messages": _stringify_tool_call_args(messages), "tools": tools},
+        )
     response.raise_for_status()
     body = response.json()
     message = body["choices"][0]["message"]

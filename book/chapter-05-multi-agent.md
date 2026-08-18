@@ -154,9 +154,53 @@ summary_line += " | Report: " + graph_result.get("final_report", "")
 
 Verified fully end to end locally against a real `TickerJob` row (MSFT/US): a real multi-section report — fundamentals, technical, news, risk, and a synthesized headline — landed in Postgres, alongside a correctly-summed `TokenUsage` row for the full five-agent run.
 
+## A Correction: The Graph Wasn't Actually Running in Parallel
+
+This needs to be said plainly rather than quietly fixed and left unmentioned: the graph above was described as running Fundamentals, Technical, and News "in parallel" — and the *wiring* was correct — but the actual execution wasn't genuinely concurrent until this got checked directly. Asked what scaling further would take, the honest first step was measuring, not assuming: instrumenting the real graph run with timestamps around each node.
+
+```
+fundamentals START  t=430913.67
+fundamentals END    t=430923.63  (took 9.97s)
+news START           t=430923.63    <- starts the INSTANT fundamentals ends
+technical START       t=430926.77
+news END             t=430942.46  (took 18.83s)
+TOTAL wall-clock: 45.26s
+```
+
+`news` didn't start until `fundamentals` had *completely* finished. Total wall-clock (45s) was close to the *sum* of each agent's own time, not the *max* — the opposite of what real concurrency should look like.
+
+**The cause**: `llm/model_client.py`'s `chat()` used `requests.post()` — a synchronous, blocking call — and wasn't even declared `async def`. Every agent's harness function is `async def` and calls `chat()` without `await`, because it was never a coroutine to begin with. The mechanics matter here: `asyncio` only lets other tasks run when a coroutine hits a genuine `await` on something async. A blocking synchronous call inside an `async def` function doesn't yield control at all — it freezes the *entire* event loop until it returns. Wiring parallel edges in a graph says nothing about whether the work inside those edges can actually overlap; that depends entirely on whether the I/O underneath is genuinely async.
+
+The fix: switch to `httpx.AsyncClient`, make `chat()` itself `async def`, and add `await` at every call site:
+
+```python
+# llm/model_client.py
+async def chat(messages: list[dict], tools: list[dict]) -> dict:
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(CHAT_URL, headers=..., json=...)
+    ...
+```
+
+Re-measured with the same instrumentation, the fix proved itself:
+
+```
+fundamentals START  t=431250.92
+news START           t=431252.02    <- now within 1 second of fundamentals
+technical START       t=431252.03
+TOTAL wall-clock: 33.49s   (bound by the SLOWEST branch, not the sum)
+```
+
+**A second real gotcha, surfaced by the fix itself, not separately discovered**: the very first re-test failed outright with `httpx.ReadTimeout`. `httpx` defaults to a 5-second timeout; `requests` (used before) has no default timeout at all, so this was never a problem until switching libraries. Three agents now genuinely competing for the same rate-limited Azure OpenAI capacity concurrently made responses legitimately slower than 5 seconds under real load. Fixed with an explicit `timeout=90.0`.
+
+> 🏭 **Production Lens:** "The graph diagram shows parallel edges" and "the work actually overlaps in wall-clock time" are two different claims, and only measuring proves the second one. This is exactly the kind of thing easy to assume is true because the code *looks* concurrent (every function is `async def`, the graph draws parallel arrows) — and exactly why this project has leaned on "verify actual behavior, don't trust what a command or a diagram implies" as a standing discipline since the Container Apps stale-deploy incident back in Chapter 3.
+
+**Scaling further has two more real dimensions beyond this fix, worth naming rather than assuming this fix alone means "solved":**
+1. **Azure OpenAI's rate limit becomes the real ceiling as concurrency increases.** The current deployment's `GlobalStandard` capacity (10K tokens/minute) is a genuine, non-code limit — more parallel agents or more concurrent tickers will eventually hit real `429` responses, fixable only by raising capacity or adding client-side backoff, not more `asyncio`.
+2. **Multiple *tickers* running concurrently is a different axis than one ticker's graph running concurrently.** `worker.py`'s `async for msg in receiver` loop still processes Service Bus messages one at a time — two different tickers in the same request still run their graphs sequentially, even after this fix. The real production answer for that is more `alpha-worker` Container App replicas, autoscaled on queue depth — horizontal scaling, not parallelizing further inside one process.
+
 ## Where Phase 5 Actually Stands
 
-The multi-agent graph is real, proven, and wired into the worker — genuine parallel execution, a genuine cross-signal Risk judgment, a real concurrency bug caught before it shipped rather than discovered in production. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables), and — as always in this project — an actual deploy and a live check before this chapter is called finished.
+The multi-agent graph is real, proven, and wired into the worker — genuinely concurrent execution now (measured, not assumed), a genuine cross-signal Risk judgment, and two real concurrency bugs caught before either shipped silently wrong: the `usage_log` last-write-wins trap, and the blocking-`chat()` bug that made "parallel" wiring not actually mean parallel execution. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables), and — as always in this project — an actual deploy and a live check before this chapter is called finished.
 
 ## What Came Out of This Chapter (So Far)
 
@@ -164,6 +208,6 @@ The multi-agent graph is real, proven, and wired into the worker — genuine par
 - A real technical-indicators tool, with SMA and RSI genuinely understood — not just called, but the actual math worked through by hand, including why the RS-ratio-to-0–100 transform behaves the way it does at its extremes.
 - A generalized harness (`run_agent` vs. `run_synthesis`) drawing a real, principled line between "genuine tool-choice" and "always-fetch-then-synthesize" — validated against the prior project's own equivalent design choice, not invented in isolation.
 - Five real agents, each proven standalone before being wired together — including the first agent in this project (Risk) where an LLM's synthesis is genuinely load-bearing, not a narrative layer on top of numbers that already spoke for themselves.
-- A real LangGraph `StateGraph` with genuine parallel execution, and a real concurrency bug (last-write-wins silently discarding parallel contributions to a shared key) caught and fixed with a proper reducer before it ever produced a wrong number silently.
+- A real LangGraph `StateGraph`, and two real concurrency bugs caught rather than shipped silently wrong: a last-write-wins state-merge trap (fixed with a proper reducer) and a blocking synchronous HTTP call that made "parallel" graph wiring not actually mean parallel execution (fixed by switching to a genuinely async HTTP client) — plus the follow-on timeout gotcha that fix itself surfaced. A concrete lesson that "the code looks concurrent" and "the code IS concurrent" are different claims, and only measuring proves the second one.
 - The Phase 4 hybrid design retired for a principled reason, not just because more code existed: once the graph's own agents did the same deterministic work internally, keeping a separate copy in `worker.py` stopped being cheap insurance and became genuine waste.
 - Phase 5 still open: Skills restructuring, real three-tier memory, and the first live deploy of any of it.

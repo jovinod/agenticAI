@@ -62,7 +62,7 @@ async def run_agent(
 
     for _ in range(max_turns):
         messages = assemble_context(history, system_prompt)
-        result = chat(messages, tool_schemas)
+        result = await chat(messages, tool_schemas)
         response = result["message"]
         _accumulate(total_usage, result["usage"])
         history.append(response)
@@ -104,5 +104,5 @@ async def run_synthesis(system_prompt: str, user_message: str) -> dict:
     per call)."
     """
     messages = assemble_context([{"role": "user", "content": user_message}], system_prompt)
-    result = chat(messages, tools=[])
+    result = await chat(messages, tools=[])
     return {"status": "success", "answer": result["message"]["content"], "usage": result["usage"]}
