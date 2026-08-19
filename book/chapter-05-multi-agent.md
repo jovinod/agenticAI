@@ -213,7 +213,7 @@ TOTAL wall-clock: 33.49s   (bound by the SLOWEST branch, not the sum)
 | `backend/worker/agents/synthesizer_agent.py` | Combines all four into the final report. |
 | `backend/worker/agents/graph.py` | The real LangGraph `StateGraph` — parallel fan-out, fan-in to Risk, then Synthesizer; the `usage_log` reducer fix lives here. |
 | `backend/worker/worker.py` | `process_ticker` now calls the graph directly, retiring the Phase 4 hybrid. |
-| `backend/worker/llm/model_client.py` | `chat()` switched from blocking `requests` to genuinely async `httpx.AsyncClient` — the fix that made the graph's parallel wiring actually run in parallel. |
+| `backend/worker/llm/model_client.py` | `chat()` switched from blocking `requests` to genuinely async `httpx.AsyncClient` — the fix that made the graph's parallel wiring actually run in parallel. Also later routed through APIM (subscription key auth) instead of calling Foundry directly. |
 
 ## The Flow So Far
 
@@ -228,7 +228,9 @@ flowchart TD
     Fund -->|"run_synthesis"| Harness["agent_harness.py"]
     Tech -->|"run_synthesis"| Harness
     News -->|"run_agent (full loop)"| Harness
-    Harness --> ModelClient["llm/model_client.py:<br/>chat() -- now async httpx"]
+    Harness --> ModelClient["llm/model_client.py:<br/>chat() -- async httpx"]
+    ModelClient --> APIM["alpha-research-apim<br/>(Ocp-Apim-Subscription-Key)"]
+    APIM --> Foundry["alpha-research-openai<br/>(managed identity auth)"]
 
     Fund --> Risk["agents/risk_agent.py"]
     Tech --> Risk
@@ -244,67 +246,47 @@ flowchart TD
     class WorkerPy,Graph,Fund,Tech,News,Risk,Synth,Harness,ModelClient file
 ```
 
-## Azure Architecture — Nothing New Deployed Yet
+## Azure Architecture — Two Real Scaling Pieces Now Deployed
 
-Consistent with every prior chapter's discipline: this section only shows what's actually live. Phase 5's whole build so far — the graph, the five agents, the async fix — has been proven locally, exactly like Phase 4's agent was before its own deploy step. The live Azure architecture is **unchanged from Chapter 4** — same Static Web App, API, Service Bus, worker, Postgres, Redis, and Azure OpenAI deployment. No new Azure resource has been created this chapter; the same `alpha-research-openai` deployment now just gets called by five agents per ticker instead of one.
+Unlike most of this chapter, this section documents changes made in a later session, prompted directly by the reader's own follow-up questions about scaling — not a separate build pass, but real infrastructure added while working through exactly the scaling questions raised below. Both pieces are live, verified, not exploratory.
 
-## Scaling Options — Exploratory, Not Yet Built
-
-This section is different in kind from every diagram elsewhere in this book: it does **not** show what's deployed. It shows real architectural options for the question raised earlier in this chapter — Azure OpenAI's rate limit becomes the actual ceiling as agent concurrency increases — worked through visually rather than left as a paragraph. None of these are built; this is what "scaling the Foundry layer" could look like if it became necessary.
-
-**Option A — Raise capacity on the existing deployment.** No architecture change at all, just a bigger number on the same resource (`GlobalStandard` capacity 10 → higher, or switch to Provisioned Throughput Units for dedicated, predictable capacity). The simplest lever, with a real ceiling of its own.
+**Azure API Management (Consumption tier)** now fronts the Foundry deployment, replacing the direct worker→Foundry call from earlier in this chapter:
 
 ```mermaid
 flowchart LR
-    Worker["alpha-worker<br/>(5 agents/ticker)"] --> OpenAI["alpha-research-openai<br/>capacity: 10 -> N"]
+    Worker["alpha-worker"] -->|"Ocp-Apim-Subscription-Key"| APIM["alpha-research-apim<br/>(Consumption tier)"]
+    APIM -->|"managed identity (AAD token)<br/>no stored key"| OpenAI["alpha-research-openai<br/>(South India)"]
 ```
 
-**Option B — Multiple deployments, load-balanced in our own code.** Provision the same model in more than one Azure OpenAI resource (possibly different regions), store multiple endpoint+key pairs, and have `model_client.py` pick one per request.
+Provisioned with a system-assigned managed identity, granted the `Cognitive Services OpenAI User` role directly on the Foundry resource — APIM authenticates to Foundry itself via a real Azure AD token, acquired fresh per request via the `authentication-managed-identity` policy. The worker no longer holds the raw Foundry API key at all; it only ever sees an APIM subscription key, itself scoped to just this one API. A real, non-obvious gotcha hit setting this up: the API's own client-facing path (`openai`) was being *stripped* by APIM before forwarding to the backend — but Azure OpenAI's actual REST path also starts with `/openai/deployments/...`, so the forwarded request was silently missing that segment, producing a `404` that looked like a routing failure but was actually a path-construction bug. Fixed by giving the API an empty client-facing path, so the full incoming path forwards to the backend unchanged. Verified with a direct `curl` through the whole chain (subscription key → APIM → managed identity token → Foundry → real response) before touching any application code — the same discipline used for every other piece in this project.
+
+**The KEDA scale rule's `messageCount` dropped from 5 to 1** — deliberately aggressive, aiming for roughly one worker replica per queued ticker rather than one per five. Working through the actual formula (`replicas = ceil(queue_length / messageCount)`) surfaced a real, worth-remembering correction: a *higher* `messageCount` means *less* aggressive scaling, not more — the number means "how many messages one replica is expected to handle," so getting "one replica per ticker" required setting it to 1, not to a number that sounded like "2 tickers, 2 replicas." A real, acknowledged tradeoff comes with this: more replicas now compete harder for the same Foundry capacity behind APIM, which doesn't add capacity on its own — just a gateway layer in front of the same 10K TPM. This value is intentionally temporary — the plan is to revert it closer to 5 once the project nears completion, once aggressive per-ticker scaling has served its purpose of exercising the autoscaling path directly.
+
+## Scaling Options — What's Built, What's Still Exploratory
+
+**Option A — Raise capacity on the existing deployment.** Still not done; the simplest lever if the new APIM-fronted setup starts hitting real rate limits.
 
 ```mermaid
 flowchart LR
-    Worker["alpha-worker"] --> LB["model_client.py:<br/>round-robin / least-loaded"]
-    LB --> A["alpha-research-openai<br/>(South India)"]
-    LB --> B["alpha-research-openai-2<br/>(another region)"]
+    Worker["alpha-worker"] --> APIM["alpha-research-apim"] --> OpenAI["alpha-research-openai<br/>capacity: 10 -> N"]
 ```
 
-**Option C — Azure API Management fronting a backend pool.** Microsoft's own documented pattern for this exact problem: APIM handles load balancing, retries, and circuit-breaking across multiple Azure OpenAI backends natively, instead of `model_client.py` owning that logic by hand.
+**Option B — Multiple deployments, load-balanced in our own code.** Still not built — superseded in intent by Option C below, since APIM is now the actual gateway layer; hand-rolling load-balancing logic in `model_client.py` would duplicate what APIM already exists to do.
+
+**Option C — APIM fronting a pool of multiple Foundry backends.** **Partially real now.** APIM fronting *one* backend is built and live, described above — the mechanism (backend resource, managed-identity auth, policy-based routing) is proven. What's still exploratory is the *pool* part: a second Foundry deployment and a load-balancing policy across both. One real constraint worth remembering if this gets built: genuine round-robin/weighted routing works on the Consumption tier we're using, but the *circuit-breaker* policy (automatically detecting a throttling backend and rerouting around it) does **not** — that needs a paid dedicated tier (Basic+, ~$150+/month), confirmed by checking Microsoft's own documentation rather than assumed.
 
 ```mermaid
 flowchart LR
-    Worker["alpha-worker"] --> APIM["Azure API Management<br/>(load balancing, retry, circuit-break)"]
-    APIM --> A["alpha-research-openai<br/>(South India)"]
-    APIM --> B["alpha-research-openai-2"]
-    APIM --> C["alpha-research-openai-3"]
+    Worker["alpha-worker"] --> APIM["alpha-research-apim<br/>(round-robin possible on Consumption;<br/>circuit-breaker needs a paid tier)"]
+    APIM --> A["alpha-research-openai<br/>(South India) -- REAL"]
+    APIM -.->|"not built"| B["alpha-research-openai-2<br/>(another region)"]
 ```
-
-Option A is the immediate lever if this ever becomes a real constraint; Option C is the genuine production answer once load is high and predictable enough to justify the extra piece of infrastructure. Neither is built — noted here as real options, not a commitment.
-
-## Worker Autoscaling — Fixed for Real, Unlike the Options Above
-
-Unlike the exploratory Foundry-scaling options, this one is real and deployed: a genuine KEDA `azure-servicebus` scale rule on `alpha-worker`, added and verified the same way as everything else in this project — checked, not assumed.
-
-```bash
-az containerapp update --name alpha-worker --resource-group alpha-rg \
-  --scale-rule-name servicebus-queue-scale \
-  --scale-rule-type azure-servicebus \
-  --scale-rule-metadata "queueName=research-jobs" "messageCount=5" \
-  --scale-rule-auth "connection=servicebus-conn"
-```
-
-Reused the existing `servicebus-conn` secret rather than creating a new one — it was already scoped to `research-jobs` via its own `EntityPath`. Verified independently via `az containerapp show`, not the update command's own success message:
-
-```
-rules: [{"name": "servicebus-queue-scale", "custom": {"type": "azure-servicebus",
-  "metadata": {"queueName": "research-jobs", "messageCount": "5"},
-  "auth": [{"triggerParameter": "connection", "secretRef": "servicebus-conn"}]}}]
-```
-
-Targets roughly one replica per five queued messages, up to the existing `maxReplicas: 10`. **One honest limit on this claim**: the configuration is verified real; watching it actually trigger a live scale-up under real concurrent load hasn't been done yet, since that means submitting enough concurrent tickers to push the queue past five messages — real additional Azure OpenAI spend across multiple replicas, left as a deliberate choice rather than spent unprompted.
 
 ## Where Phase 5 Actually Stands
 
-The multi-agent graph is real, proven, and wired into the worker — genuinely concurrent execution now (measured, not assumed), a genuine cross-signal Risk judgment, and two real concurrency bugs caught before either shipped silently wrong: the `usage_log` last-write-wins trap, and the blocking-`chat()` bug that made "parallel" wiring not actually mean parallel execution. Worker autoscaling, flagged earlier as a real gap, is now genuinely fixed and verified, not just claimed. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables), and — as always in this project — an actual deploy and a live check before this chapter is called finished.
+**A correction worth stating plainly rather than burying**: deploying the APIM change turned out to also be the *first real deploy of the entire multi-agent graph itself*. `worker.py` had been calling `agents.graph.run_research()` for a while, entirely proven locally — but the live worker was still running the Phase 4 single-agent code until this session's rebuild picked up everything that had accumulated since. The real live test that proved APIM worked (`GOOGL`, a genuine four-section report — fundamentals, technical, news, risk, synthesized — returned through the real deployed API) was, at the same time, the first live proof of this whole chapter's actual subject.
+
+So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, and now a real APIM layer in front of Foundry, all confirmed against actual running Azure infrastructure. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), and the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables).
 
 ## What Came Out of This Chapter (So Far)
 
@@ -314,6 +296,8 @@ The multi-agent graph is real, proven, and wired into the worker — genuinely c
 - Five real agents, each proven standalone before being wired together — including the first agent in this project (Risk) where an LLM's synthesis is genuinely load-bearing, not a narrative layer on top of numbers that already spoke for themselves.
 - A real LangGraph `StateGraph`, and two real concurrency bugs caught rather than shipped silently wrong: a last-write-wins state-merge trap (fixed with a proper reducer) and a blocking synchronous HTTP call that made "parallel" graph wiring not actually mean parallel execution (fixed by switching to a genuinely async HTTP client) — plus the follow-on timeout gotcha that fix itself surfaced. A concrete lesson that "the code looks concurrent" and "the code IS concurrent" are different claims, and only measuring proves the second one.
 - The Phase 4 hybrid design retired for a principled reason, not just because more code existed: once the graph's own agents did the same deterministic work internally, keeping a separate copy in `worker.py` stopped being cheap insurance and became genuine waste.
-- A real, verified KEDA autoscaling rule on `alpha-worker`, closing a gap this same chapter had only flagged a day earlier — checked with `az containerapp show`, not trusted from a diagram label, the same discipline the concurrency bug itself was caught with.
-- Real scaling options for the Foundry layer worked through as diagrams, explicitly kept separate from what's actually deployed — a distinction this book has held since Chapter 1's "only show what's built," extended here to mean "and never let a speculative diagram be mistaken for one."
-- Phase 5 still open: Skills restructuring, real three-tier memory, and the first live deploy of any of it.
+- A real, verified KEDA autoscaling rule on `alpha-worker`, closing a gap this same chapter had only flagged a day earlier — checked with `az containerapp show`, not trusted from a diagram label, the same discipline the concurrency bug itself was caught with. Deliberately tuned aggressive (`messageCount=1`) for now, with an explicit, logged plan to revert closer to 5 nearer project completion.
+- A real Azure API Management deployment fronting Foundry via managed identity — the worker no longer holds a raw Foundry key at all — including a genuine gotcha (a stripped path prefix silently breaking the forwarded request) caught by testing the whole chain with `curl` before writing any application code, the exact discipline this project has used for every prior piece.
+- A precise correction to KEDA's own scaling formula, caught before the wrong number shipped: `messageCount` means messages *per replica*, so a lower number scales *more* aggressively, not less — the opposite of what the number's shape suggests at a glance.
+- **A genuinely important correction**: the APIM deploy turned out to also be the first real deployment of this entire chapter's multi-agent graph — it had been proven locally for a while, but had never actually been redeployed to the live worker until this session's rebuild. Worth naming directly rather than letting a milestone hide inside an unrelated change.
+- Phase 5 still open: Skills restructuring and the real three-tier memory model.

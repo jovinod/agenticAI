@@ -21,10 +21,10 @@ Web page (React SPA, Azure Static Web Apps)        ← ✅ live
 FastAPI (Container App, autoscale on HTTP)          ← ✅ live (alpha-api, external ingress)
    │  writes job → Azure Service Bus queue
    ▼
-Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, no ingress, min 1 / max 10 replicas) — real KEDA azure-servicebus scale rule, ~1 replica per 5 queued messages, verified via `az containerapp show` (not just the update command's success)
+Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, no ingress, min 1 / max 10 replicas) — real KEDA azure-servicebus scale rule, ~1 replica per queued message (messageCount=1, deliberately aggressive — will be reverted closer to 5 near project completion), verified via `az containerapp show` (not just the update command's success)
    │
    ├─▶ Single agent (LangGraph multi-agent flow is Phase 5) ← ✅ live — real bounded async tool-calling loop, deterministic checks run alongside it, not replaced by it
-   │      ├─ calls Azure AI Foundry (gpt-5-mini)         ← ✅ live (tracing still Phase 8)
+   │      ├─ calls Azure AI Foundry (gpt-5-mini) via Azure API Management ← ✅ live — APIM (Consumption tier) fronts Foundry, authenticates via its own managed identity (worker never holds the raw Foundry key); tracing still Phase 8
    │      ├─ calls MCP tools (stock data, news)           ← both ✅ live — stock data (direct call, yfinance) and Tavily search (real MCP server), model decides when search is worth it
    │      ├─ loads Skills (reusable capability modules)   ← flag_risk_factors ✅ live (deterministic); assess_news_sentiment ✅ live — genuine LLM-discoverable Skill, model discovers + chooses to apply it
    │      └─ reads/writes Redis + Postgres                ← both ✅ live (Redis: per-ticker result cache; Postgres: job status + token/cost log; agent memory proper is still Phase 5)
@@ -50,13 +50,14 @@ flowchart TD
     subgraph RG["Resource Group: alpha-rg  (Central India unless noted)"]
         subgraph ENV["Container Apps Environment: alpha-env"]
             API["Container App: alpha-api\n(external ingress, port 8000)"]
-            Worker["Container App: alpha-worker\n(no ingress, min 1 / max 10 replicas,\nKEDA scale rule: 1 replica per 5 queued msgs)"]
+            Worker["Container App: alpha-worker\n(no ingress, min 1 / max 10 replicas,\nKEDA scale rule: 1 replica per queued msg)"]
         end
         ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
         SB["Service Bus Namespace: alpharesearchsb\nqueue: research-jobs"]
         PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha (+ token_usage table)")]
         Redis[("Managed Redis:\nalpha-research-cache\nport 10000, TLS, key auth")]
         LAW["Log Analytics workspace:\nworkspace-alphargK2N9\n(auto-created by alpha-env)"]
+        APIM["API Management: alpha-research-apim\n(Consumption tier, managed identity)"]
         OpenAI["Azure OpenAI: alpha-research-openai (South India)\ndeployment: gpt-5-mini"]
     end
 
@@ -68,7 +69,8 @@ flowchart TD
     Worker -->|"read/write (admin user+pass)"| PG
     API -->|"cache check (read) — access key"| Redis
     Worker -->|"cache write — access key"| Redis
-    Worker -->|"tool-calling + token/cost logging — api-key"| OpenAI
+    Worker -->|"tool-calling + token/cost logging\nOcp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity (AAD token)\nno stored key"| OpenAI
     SB -.->|"KEDA polls queue depth\n(same servicebus-conn secret)"| Worker
     ENV -.->|pulls images| ACR
     ENV -.->|logs/metrics| LAW

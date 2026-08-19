@@ -15,6 +15,15 @@ event loop while waiting for a response. Real, measured consequence: three
 httpx.AsyncClient actually yields control during the network wait, letting
 other coroutines run -- this is what real concurrency in this codebase
 depends on, not just wiring parallel edges in a graph.
+
+Also Phase 5: calls now go through Azure API Management (Consumption tier)
+instead of hitting alpha-research-openai directly. APIM authenticates to
+Foundry itself via its own managed identity (an Azure AD token, not a
+stored key) -- the worker only ever holds an APIM subscription key, never
+the raw Azure OpenAI key at all. This is what makes the exploratory
+"multiple backends behind one gateway" scaling option from Chapter 5
+actually reachable later without another change here: only the backend(s)
+APIM routes to would need to change, not this file.
 """
 import json
 import os
@@ -25,13 +34,13 @@ from dotenv import load_dotenv
 # directly, same pattern already used in worker.py.
 load_dotenv(".env.local")
 
-AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
-AZURE_OPENAI_KEY = os.environ["AZURE_OPENAI_KEY"]
+APIM_GATEWAY_URL = os.environ["APIM_GATEWAY_URL"].rstrip("/")
+APIM_SUBSCRIPTION_KEY = os.environ["APIM_SUBSCRIPTION_KEY"]
 AZURE_OPENAI_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT"]
 API_VERSION = "2024-08-01-preview"
 
 CHAT_URL = (
-    f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}"
+    f"{APIM_GATEWAY_URL}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}"
     f"/chat/completions?api-version={API_VERSION}"
 )
 
@@ -86,7 +95,7 @@ async def chat(messages: list[dict], tools: list[dict]) -> dict:
     async with httpx.AsyncClient(timeout=90.0) as client:
         response = await client.post(
             CHAT_URL,
-            headers={"api-key": AZURE_OPENAI_KEY, "Content-Type": "application/json"},
+            headers={"Ocp-Apim-Subscription-Key": APIM_SUBSCRIPTION_KEY, "Content-Type": "application/json"},
             json={"messages": _stringify_tool_call_args(messages), "tools": tools},
         )
     response.raise_for_status()
