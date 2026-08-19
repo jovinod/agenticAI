@@ -241,6 +241,35 @@ flowchart TB
     class API,SB,Worker,PG new
 ```
 
+## Key Files From This Chapter
+
+| File | What it does |
+|---|---|
+| `backend/api/main.py` | The FastAPI app — `POST /research` (writes a `queued` Postgres row, sends a Service Bus message) and `GET /research/{job_id}` (reads status back from Postgres). CORS configured here too. |
+| `backend/api/models.py` | `Job` — the SQLModel table: `job_id`, `tickers`, `status`, `result`, `created_at`. |
+| `backend/worker/worker.py` | The Service Bus receive loop (`async for msg in receiver`) and `process_research` — updates the same Postgres row to `running` then `done`. |
+| `backend/worker/models.py` | `Job`, duplicated from the API's copy — a real, acknowledged piece of debt (see `decisions.md`), not an oversight. |
+| `backend/api/Dockerfile`, `backend/worker/Dockerfile` | `uv`-based multi-layer builds for each service — two separate images, two separate Container Apps. |
+| `frontend/src/App.jsx` | The fake `setTimeout` flow from Chapter 1 replaced with a real `fetch` to `POST /research`, then `setInterval`-based polling of `GET /research/{job_id}`. |
+
+## The Flow So Far
+
+```mermaid
+flowchart TD
+    User(["User submits tickers"]) --> AppJSX["App.jsx:<br/>fetch POST /research"]
+    AppJSX --> MainPy["main.py:<br/>create_research()"]
+    MainPy -->|"write status=queued"| PG[("Postgres:<br/>Job table")]
+    MainPy -->|"send message"| SB(["Service Bus queue"])
+    SB -->|"async for msg in receiver"| WorkerPy["worker.py:<br/>process_research()"]
+    WorkerPy -->|"status=running, then done"| PG
+    AppJSX -->|"polls every 1s"| MainPy2["main.py:<br/>get_research()"]
+    MainPy2 -->|"read status/result"| PG
+    MainPy2 --> AppJSX
+
+    classDef file fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    class AppJSX,MainPy,WorkerPy,MainPy2 file
+```
+
 ## What Came Out of This Chapter
 
 - A real distributed round trip: browser → API → queue → worker → database → back to the browser, with each hop independently real and independently deployed.

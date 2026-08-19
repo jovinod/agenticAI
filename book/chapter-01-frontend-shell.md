@@ -182,6 +182,32 @@ flowchart TB
     class SWA live
 ```
 
+## Key Files From This Chapter
+
+| File | What it does |
+|---|---|
+| `frontend/src/App.jsx` | The entire app so far — `tickerInput`/`status`/`report`/`error` state, the controlled input, `handleSubmit`'s validation, and the fake `setTimeout`-driven `idle → loading → done` flow. |
+| `frontend/src/App.css` | Styling — the centered "Google-style" layout, reusing the scaffold's existing `#center` utility and theme color variables. |
+| `frontend/index.html` | The near-empty HTML shell Vite serves to every visitor — just a mount point and a script tag, no real content baked in. |
+| `.github/workflows/azure-static-web-apps-*.yml` | Auto-generated when the Static Web App was created — rebuilds and redeploys on every push to `main`. |
+
+## The Flow So Far
+
+Everything this chapter built happens entirely inside the browser — there's no backend yet for any arrow to actually leave it.
+
+```mermaid
+flowchart TD
+    User(["User types a ticker,<br/>hits submit"]) -->|onChange / onClick| AppJSX["App.jsx:<br/>handleSubmit()"]
+    AppJSX -->|"regex validation"| Valid{Valid format?}
+    Valid -->|No| ErrorState["App.jsx:<br/>setError(...)"]
+    Valid -->|Yes| Fake["App.jsx:<br/>setTimeout(...) fakes network delay<br/>crypto.randomUUID() fakes a job_id"]
+    Fake -->|"after 2s"| Report["App.jsx:<br/>setReport(...) + setStatus('done')"]
+    Report --> Render["Re-render:<br/>status === 'done' branch shows the fake report"]
+
+    classDef file fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    class AppJSX,ErrorState,Fake,Report file
+```
+
 ## What Came Out of This Chapter
 
 - A React + Vite frontend, chosen because the app's shape — a state machine, not a document — matched React's actual specialty, not because it was the popular default.

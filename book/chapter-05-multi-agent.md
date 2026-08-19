@@ -198,9 +198,91 @@ TOTAL wall-clock: 33.49s   (bound by the SLOWEST branch, not the sum)
 1. **Azure OpenAI's rate limit becomes the real ceiling as concurrency increases.** The current deployment's `GlobalStandard` capacity (10K tokens/minute) is a genuine, non-code limit — more parallel agents or more concurrent tickers will eventually hit real `429` responses, fixable only by raising capacity or adding client-side backoff, not more `asyncio`.
 2. **Multiple *tickers* running concurrently is a different axis than one ticker's graph running concurrently.** `worker.py`'s `async for msg in receiver` loop still processes Service Bus messages one at a time — two different tickers in the same request still run their graphs sequentially, even after this fix. The real production answer for that is more `alpha-worker` Container App replicas, autoscaled on queue depth — horizontal scaling, not parallelizing further inside one process.
 
+## Key Files From This Chapter
+
+| File | What it does |
+|---|---|
+| `backend/worker/tools/technical_indicators.py` | `fetch_technical_indicators()` — real SMA-20, SMA-50, RSI-14 from `yfinance` price history. |
+| `backend/worker/tools/stock_data.py` | `resolve_symbol_candidates()` extracted out — now shared by this tool and the technical indicators tool. |
+| `backend/worker/agent_harness.py` | The generalized engine: `run_agent()` (full tool-calling loop) and `run_synthesis()` (single call, no tools) — every agent below is built on one of these two. |
+| `backend/worker/context_assembler.py` | `system_prompt` changed from a fixed constant to a parameter — the precondition for five agents each having their own. |
+| `backend/worker/agents/fundamentals_agent.py` | Direct fetch + `run_synthesis` — fundamentals narrative. |
+| `backend/worker/agents/technical_agent.py` | Direct fetch + `run_synthesis` — momentum narrative. |
+| `backend/worker/agents/news_agent.py` | `run_agent`'s full loop — search + the `assess_news_sentiment` Skill, genuine judgment preserved from Chapter 4. |
+| `backend/worker/agents/risk_agent.py` | Deterministic `flag_risk_factors` + cross-signal synthesis over the other three agents' outputs. |
+| `backend/worker/agents/synthesizer_agent.py` | Combines all four into the final report. |
+| `backend/worker/agents/graph.py` | The real LangGraph `StateGraph` — parallel fan-out, fan-in to Risk, then Synthesizer; the `usage_log` reducer fix lives here. |
+| `backend/worker/worker.py` | `process_ticker` now calls the graph directly, retiring the Phase 4 hybrid. |
+| `backend/worker/llm/model_client.py` | `chat()` switched from blocking `requests` to genuinely async `httpx.AsyncClient` — the fix that made the graph's parallel wiring actually run in parallel. |
+
+## The Flow So Far
+
+```mermaid
+flowchart TD
+    WorkerPy["worker.py:<br/>process_ticker()"] --> Graph["agents/graph.py:<br/>run_research()"]
+
+    Graph -->|"START, parallel"| Fund["agents/fundamentals_agent.py"]
+    Graph -->|"START, parallel"| Tech["agents/technical_agent.py"]
+    Graph -->|"START, parallel"| News["agents/news_agent.py"]
+
+    Fund -->|"run_synthesis"| Harness["agent_harness.py"]
+    Tech -->|"run_synthesis"| Harness
+    News -->|"run_agent (full loop)"| Harness
+    Harness --> ModelClient["llm/model_client.py:<br/>chat() -- now async httpx"]
+
+    Fund --> Risk["agents/risk_agent.py"]
+    Tech --> Risk
+    News --> Risk
+    Risk -->|"run_synthesis"| Harness
+
+    Risk --> Synth["agents/synthesizer_agent.py"]
+    Synth -->|"run_synthesis"| Harness
+    Synth --> Report["final_report + usage_log"]
+    Report -->|"write"| PG[("Postgres:<br/>TickerJob + TokenUsage")]
+
+    classDef file fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    class WorkerPy,Graph,Fund,Tech,News,Risk,Synth,Harness,ModelClient file
+```
+
+## Azure Architecture — Nothing New Deployed Yet
+
+Consistent with every prior chapter's discipline: this section only shows what's actually live. Phase 5's whole build so far — the graph, the five agents, the async fix — has been proven locally, exactly like Phase 4's agent was before its own deploy step. The live Azure architecture is **unchanged from Chapter 4** — same Static Web App, API, Service Bus, worker, Postgres, Redis, and Azure OpenAI deployment. No new Azure resource has been created this chapter; the same `alpha-research-openai` deployment now just gets called by five agents per ticker instead of one.
+
+## Scaling Options — Exploratory, Not Yet Built
+
+This section is different in kind from every diagram elsewhere in this book: it does **not** show what's deployed. It shows real architectural options for the question raised earlier in this chapter — Azure OpenAI's rate limit becomes the actual ceiling as agent concurrency increases — worked through visually rather than left as a paragraph. None of these are built; this is what "scaling the Foundry layer" could look like if it became necessary.
+
+**Option A — Raise capacity on the existing deployment.** No architecture change at all, just a bigger number on the same resource (`GlobalStandard` capacity 10 → higher, or switch to Provisioned Throughput Units for dedicated, predictable capacity). The simplest lever, with a real ceiling of its own.
+
+```mermaid
+flowchart LR
+    Worker["alpha-worker<br/>(5 agents/ticker)"] --> OpenAI["alpha-research-openai<br/>capacity: 10 -> N"]
+```
+
+**Option B — Multiple deployments, load-balanced in our own code.** Provision the same model in more than one Azure OpenAI resource (possibly different regions), store multiple endpoint+key pairs, and have `model_client.py` pick one per request.
+
+```mermaid
+flowchart LR
+    Worker["alpha-worker"] --> LB["model_client.py:<br/>round-robin / least-loaded"]
+    LB --> A["alpha-research-openai<br/>(South India)"]
+    LB --> B["alpha-research-openai-2<br/>(another region)"]
+```
+
+**Option C — Azure API Management fronting a backend pool.** Microsoft's own documented pattern for this exact problem: APIM handles load balancing, retries, and circuit-breaking across multiple Azure OpenAI backends natively, instead of `model_client.py` owning that logic by hand.
+
+```mermaid
+flowchart LR
+    Worker["alpha-worker"] --> APIM["Azure API Management<br/>(load balancing, retry, circuit-break)"]
+    APIM --> A["alpha-research-openai<br/>(South India)"]
+    APIM --> B["alpha-research-openai-2"]
+    APIM --> C["alpha-research-openai-3"]
+```
+
+Option A is the immediate lever if this ever becomes a real constraint; Option C is the genuine production answer once load is high and predictable enough to justify the extra piece of infrastructure. Neither is built — noted here as real options, not a commitment.
+
 ## Where Phase 5 Actually Stands
 
-The multi-agent graph is real, proven, and wired into the worker — genuinely concurrent execution now (measured, not assumed), a genuine cross-signal Risk judgment, and two real concurrency bugs caught before either shipped silently wrong: the `usage_log` last-write-wins trap, and the blocking-`chat()` bug that made "parallel" wiring not actually mean parallel execution. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables), and — as always in this project — an actual deploy and a live check before this chapter is called finished.
+The multi-agent graph is real, proven, and wired into the worker — genuinely concurrent execution now (measured, not assumed), a genuine cross-signal Risk judgment, and two real concurrency bugs caught before either shipped silently wrong: the `usage_log` last-write-wins trap, and the blocking-`chat()` bug that made "parallel" wiring not actually mean parallel execution. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables), and — as always in this project — an actual deploy and a live check before this chapter is called finished. Also still open, flagged this chapter but not fixed: `alpha-worker` has no real autoscaling rule configured (`rules: null`, verified directly) despite the project's own README previously claiming otherwise — a real gap for a later pass, not a Phase 5 build item.
 
 ## What Came Out of This Chapter (So Far)
 

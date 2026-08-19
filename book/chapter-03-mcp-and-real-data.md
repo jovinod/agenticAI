@@ -295,6 +295,38 @@ flowchart TB
     class Redis new
 ```
 
+## Key Files From This Chapter
+
+| File | What it does |
+|---|---|
+| `backend/worker/tools/stock_data.py` | `fetch_stock_data(ticker, market)` — the direct-call yfinance lookup, US/India symbol resolution. |
+| `backend/worker/skills/flag_risk_factors/flag_risk_factors.py` | The deterministic Skill — 52-week-low and P/E threshold checks, no LLM. |
+| `backend/worker/mcp_server/search_server.py` | The custom MCP server exposing one tool, `search`, wrapping Tavily. |
+| `backend/worker/mcp_server/test_client.py` | Isolation test — `list_tools()` (free) + one real `call_tool` (spends real budget, deliberately minimal). |
+| `backend/worker/tools/web_search.py` | `search_via_mcp()` — a reusable wrapper proven from the worker's own codebase, deliberately not called by the automatic flow yet. |
+| `backend/api/models.py`, `backend/worker/models.py` | `TickerJob` — the fan-out redesign: one row per `(job_id, ticker)`, not one row per whole request. |
+| `backend/api/main.py` | Per-ticker Redis cache check before enqueueing; a cache hit skips the queue entirely, a miss gets its own Service Bus message. |
+| `backend/worker/worker.py` | `process_ticker()` — one ticker per message now, composes `fetch_stock_data` + `flag_risk_factors` into the report line, writes the Redis cache. |
+| `frontend/src/App.jsx` | Market `<select>` added; `fetch`/polling wrapped in try/catch after the "stuck on Analyzing..." incident. |
+
+## The Flow So Far
+
+```mermaid
+flowchart TD
+    User(["User submits tickers + market"]) --> MainPy["main.py:<br/>create_research()"]
+    MainPy -->|"per ticker: cache check"| Redis[("Redis:<br/>research:{market}:{ticker}:{date}")]
+    Redis -->|"hit"| Done["status=done immediately,<br/>no queue trip"]
+    Redis -->|"miss"| SB(["Service Bus:<br/>one message per ticker"])
+    SB --> WorkerPy["worker.py:<br/>process_ticker()"]
+    WorkerPy --> StockData["tools/stock_data.py:<br/>fetch_stock_data()"]
+    StockData --> RiskSkill["skills/flag_risk_factors.py:<br/>flag_risk_factors()"]
+    RiskSkill -->|"write cache + Postgres"| Redis
+    WorkerPy -.->|"proven, not auto-called"| SearchServer["mcp_server/search_server.py<br/>+ tools/web_search.py"]
+
+    classDef file fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    class MainPy,WorkerPy,StockData,RiskSkill,SearchServer file
+```
+
 ## What Came Out of This Chapter
 
 - Real stock data, for real tickers, in two real markets — via one deliberately simple direct API call, with market chosen explicitly rather than guessed.

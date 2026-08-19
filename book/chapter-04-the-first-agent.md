@@ -466,6 +466,41 @@ flowchart TB
     class OpenAI new
 ```
 
+## Key Files From This Chapter
+
+| File | What it does |
+|---|---|
+| `backend/worker/context_assembler.py` | `assemble_context()` — prepends the system prompt, strips stale `thinking` content before resending history. |
+| `backend/worker/llm/model_client.py` | `chat()` — swappable model backend, swapped from Ollama to Azure OpenAI mid-chapter; token/cost computed here. |
+| `backend/worker/agent.py` | The single-agent tool-calling loop — `TOOL_SCHEMAS`/`TOOL_REGISTRY`, `run_agent()`, bounded by `MAX_TURNS`. |
+| `backend/worker/skills/assess_news_sentiment/SKILL.md` | The genuine LLM-discoverable Skill's rubric — real red flags vs. routine coverage. |
+| `backend/worker/skills/assess_news_sentiment/skill.py` | `load_instructions()` — reads the rubric, strips frontmatter, hands it to the model as a tool result. |
+| `backend/worker/models.py` | `TokenUsage` table — one row per real call, `prompt_tokens`/`completion_tokens`/`estimated_cost_usd`. |
+| `backend/worker/worker.py` | Wired `run_agent` in as a hybrid alongside the Chapter 3 deterministic path — both run, neither replaces the other. |
+| `backend/worker/llm_experiments/test_tool_loop.py`, `test_context_assembler.py`, `test_model_client.py` | The isolation scripts each piece was proven against before being wired together. |
+
+## The Flow So Far
+
+```mermaid
+flowchart TD
+    WorkerPy["worker.py:<br/>process_ticker()"] -->|"deterministic path, unchanged"| StockData["tools/stock_data.py"]
+    WorkerPy -->|"LLM synthesis, new this chapter"| AgentPy["agent.py:<br/>run_agent()"]
+    AgentPy --> CtxAsm["context_assembler.py:<br/>assemble_context()"]
+    CtxAsm --> ModelClient["llm/model_client.py:<br/>chat()"]
+    ModelClient -->|"tool_calls?"| Dispatch{Model requests a tool?}
+    Dispatch -->|"fetch_stock_data"| StockData
+    Dispatch -->|"search_web"| WebSearch["tools/web_search.py"]
+    Dispatch -->|"assess_news_sentiment"| SkillPy["skills/.../skill.py:<br/>load_instructions()"]
+    StockData --> CtxAsm
+    WebSearch --> CtxAsm
+    SkillPy --> CtxAsm
+    Dispatch -->|"no more tool calls"| Answer["Final answer + usage"]
+    Answer -->|"write"| TokenUsage[("Postgres:<br/>TokenUsage row")]
+
+    classDef file fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    class WorkerPy,AgentPy,CtxAsm,ModelClient,StockData,WebSearch,SkillPy file
+```
+
 ## What Came Out of This Chapter
 
 - A real, working proof of the full tool-calling loop against a real model: decide → execute for real → feed the real result back → genuine grounded answer.

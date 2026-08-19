@@ -21,7 +21,7 @@ Web page (React SPA, Azure Static Web Apps)        ← ✅ live
 FastAPI (Container App, autoscale on HTTP)          ← ✅ live (alpha-api, external ingress)
    │  writes job → Azure Service Bus queue
    ▼
-Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, no ingress, min 1 replica)
+Worker (Container App, min 1 replica)               ← ✅ live (alpha-worker, no ingress) — queue-depth autoscaling NOT actually configured (verified: `rules: null`); fixed at 1 replica regardless of queue depth, a real gap not yet built
    │
    ├─▶ Single agent (LangGraph multi-agent flow is Phase 5) ← ✅ live — real bounded async tool-calling loop, deterministic checks run alongside it, not replaced by it
    │      ├─ calls Azure AI Foundry (gpt-5-mini)         ← ✅ live (tracing still Phase 8)
