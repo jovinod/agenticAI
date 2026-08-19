@@ -282,6 +282,39 @@ flowchart LR
     APIM -.->|"not built"| B["alpha-research-openai-2<br/>(another region)"]
 ```
 
+## The Architecture So Far
+
+This is the diagram every chapter has grown, one real piece at a time, since Chapter 1's single box. Everything from Chapters 1–4 stays exactly as it was; this chapter adds one new node (`alpha-research-apim`) and changes one edge — `Worker` no longer calls `alpha-research-openai` directly, it now goes through APIM, which authenticates to Foundry itself via managed identity.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queue: research-jobs"]
+    Worker["Container App: alpha-worker<br/>(no ingress, min 1 / max 10 replicas,<br/>KEDA: 1 replica per queued msg)"]
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ token_usage table")]
+    Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
+    APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — deployment: gpt-5-mini"]
+
+    User --> SWA
+    SWA -->|HTTPS| API
+    API -->|send job, per ticker on miss| SB
+    SB -->|deliver job| Worker
+    API -->|read status| PG
+    Worker -->|write status/result/token-cost| PG
+    API -->|cache check| Redis
+    Worker -->|cache write| Redis
+    Worker -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity (AAD token)"| OpenAI
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
+    class SWA,API,SB,Worker,PG,Redis,OpenAI existing
+    class APIM new
+```
+
 ## Where Phase 5 Actually Stands
 
 **A correction worth stating plainly rather than burying**: deploying the APIM change turned out to also be the *first real deploy of the entire multi-agent graph itself*. `worker.py` had been calling `agents.graph.run_research()` for a while, entirely proven locally — but the live worker was still running the Phase 4 single-agent code until this session's rebuild picked up everything that had accumulated since. The real live test that proved APIM worked (`GOOGL`, a genuine four-section report — fundamentals, technical, news, risk, synthesized — returned through the real deployed API) was, at the same time, the first live proof of this whole chapter's actual subject.
