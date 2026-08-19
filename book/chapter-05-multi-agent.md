@@ -198,6 +198,42 @@ TOTAL wall-clock: 33.49s   (bound by the SLOWEST branch, not the sum)
 1. **Azure OpenAI's rate limit becomes the real ceiling as concurrency increases.** The current deployment's `GlobalStandard` capacity (10K tokens/minute) is a genuine, non-code limit — more parallel agents or more concurrent tickers will eventually hit real `429` responses, fixable only by raising capacity or adding client-side backoff, not more `asyncio`.
 2. **Multiple *tickers* running concurrently is a different axis than one ticker's graph running concurrently.** `worker.py`'s `async for msg in receiver` loop still processes Service Bus messages one at a time — two different tickers in the same request still run their graphs sequentially, even after this fix. The real production answer for that is more `alpha-worker` Container App replicas, autoscaled on queue depth — horizontal scaling, not parallelizing further inside one process.
 
+## Skills, Actually Discoverable Now
+
+One real gap sat unaddressed since the News agent was first built: `assess_news_sentiment` was genuinely LLM-discoverable *within* `news_agent.py`, but only because that one file happened to hardcode it into its own `TOOL_SCHEMAS`/`TOOL_REGISTRY`. Nothing scanned the `skills/` folder itself; nothing made a skill available to any agent other than the one that happened to import it by name. `flag_risk_factors` — no `SKILL.md`, never meant to be a model's choice — correctly stayed outside this entirely.
+
+```python
+# skills/discovery.py
+def discover_skills() -> tuple[list[dict], dict]:
+    """Built fresh from disk every call -- not a fixed list maintained by
+    hand, so a new skill folder is picked up without touching this file
+    or any agent that uses it."""
+    tool_schemas, tool_registry = [], {}
+    for skill_dir in sorted(SKILLS_DIR.iterdir()):
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_dir.is_dir() or not skill_md.exists():
+            continue
+        fields = _parse_frontmatter(skill_md)
+        module = importlib.import_module(f"skills.{skill_dir.name}.skill")
+        tool_schemas.append({"type": "function", "function": {
+            "name": fields["name"], "description": fields["description"],
+            "parameters": {"type": "object", "properties": {}},
+        }})
+        tool_registry[fields["name"]] = module.load_instructions
+    return tool_schemas, tool_registry
+```
+
+`news_agent.py` now calls this instead of hardcoding the one skill it happens to know about:
+
+```python
+_skill_schemas, _skill_registry = discover_skills()
+
+TOOL_SCHEMAS = [{ ... "search_web" ... }, *_skill_schemas]
+TOOL_REGISTRY = {"search_web": search_via_mcp, **_skill_registry}
+```
+
+**The real proof this is genuine discovery, not just moved hardcoding, isn't that two skills exist today — there's still only one.** It's that adding a *second* discoverable skill later requires editing exactly one thing: a new folder under `skills/` with its own `SKILL.md`. No agent's code changes at all, `news_agent.py` included. Verified standalone first (`discover_skills()` correctly finds `assess_news_sentiment`, correctly skips `flag_risk_factors`), then end to end (`news_agent.run("AAPL", "US")` — real search, the skill genuinely discovered and applied, identical quality of reasoning to before, now reached through a mechanism instead of an import).
+
 ## Key Files From This Chapter
 
 | File | What it does |
@@ -208,7 +244,8 @@ TOTAL wall-clock: 33.49s   (bound by the SLOWEST branch, not the sum)
 | `backend/worker/context_assembler.py` | `system_prompt` changed from a fixed constant to a parameter — the precondition for five agents each having their own. |
 | `backend/worker/agents/fundamentals_agent.py` | Direct fetch + `run_synthesis` — fundamentals narrative. |
 | `backend/worker/agents/technical_agent.py` | Direct fetch + `run_synthesis` — momentum narrative. |
-| `backend/worker/agents/news_agent.py` | `run_agent`'s full loop — search + the `assess_news_sentiment` Skill, genuine judgment preserved from Chapter 4. |
+| `backend/worker/agents/news_agent.py` | `run_agent`'s full loop — search + whatever `discover_skills()` finds, genuine judgment preserved from Chapter 4. |
+| `backend/worker/skills/discovery.py` | `discover_skills()` — scans `skills/` for any folder with a `SKILL.md`, builds tool schemas + a registry dynamically. Adding a new discoverable skill needs zero agent code changes. |
 | `backend/worker/agents/risk_agent.py` | Deterministic `flag_risk_factors` + cross-signal synthesis over the other three agents' outputs. |
 | `backend/worker/agents/synthesizer_agent.py` | Combines all four into the final report. |
 | `backend/worker/agents/graph.py` | The real LangGraph `StateGraph` — parallel fan-out, fan-in to Risk, then Synthesizer; the `usage_log` reducer fix lives here. |
@@ -224,6 +261,8 @@ flowchart TD
     Graph -->|"START, parallel"| Fund["agents/fundamentals_agent.py"]
     Graph -->|"START, parallel"| Tech["agents/technical_agent.py"]
     Graph -->|"START, parallel"| News["agents/news_agent.py"]
+    News -->|"discover_skills()"| Discovery["skills/discovery.py"]
+    Discovery -->|"scans for SKILL.md"| SkillFile["skills/assess_news_sentiment/"]
 
     Fund -->|"run_synthesis"| Harness["agent_harness.py"]
     Tech -->|"run_synthesis"| Harness
@@ -243,7 +282,7 @@ flowchart TD
     Report -->|"write"| PG[("Postgres:<br/>TickerJob + TokenUsage")]
 
     classDef file fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
-    class WorkerPy,Graph,Fund,Tech,News,Risk,Synth,Harness,ModelClient file
+    class WorkerPy,Graph,Fund,Tech,News,Risk,Synth,Harness,ModelClient,Discovery,SkillFile file
 ```
 
 ## Azure Architecture — Two Real Scaling Pieces Now Deployed
@@ -329,7 +368,7 @@ flowchart TB
 
 **A correction worth stating plainly rather than burying**: deploying the APIM change turned out to also be the *first real deploy of the entire multi-agent graph itself*. `worker.py` had been calling `agents.graph.run_research()` for a while, entirely proven locally — but the live worker was still running the Phase 4 single-agent code until this session's rebuild picked up everything that had accumulated since. The real live test that proved APIM worked (`GOOGL`, a genuine four-section report — fundamentals, technical, news, risk, synthesized — returned through the real deployed API) was, at the same time, the first live proof of this whole chapter's actual subject.
 
-So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, and now a real APIM layer in front of Foundry, all confirmed against actual running Azure infrastructure. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), and the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables).
+So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, and now a real APIM layer in front of Foundry, all confirmed against actual running Azure infrastructure. Skills are now genuinely discoverable rather than hardcoded per-agent, closing that flagged gap too. Only one real piece of the original Phase 5 roadmap remains: the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables) — and the Skills-discovery work itself hasn't been deployed to Azure yet, still local-only pending its own deploy step.
 
 ## What Came Out of This Chapter (So Far)
 
@@ -343,4 +382,5 @@ So: the multi-agent graph is real, proven, **and now genuinely deployed and veri
 - A real Azure API Management deployment fronting Foundry via managed identity — the worker no longer holds a raw Foundry key at all — including a genuine gotcha (a stripped path prefix silently breaking the forwarded request) caught by testing the whole chain with `curl` before writing any application code, the exact discipline this project has used for every prior piece.
 - A precise correction to KEDA's own scaling formula, caught before the wrong number shipped: `messageCount` means messages *per replica*, so a lower number scales *more* aggressively, not less — the opposite of what the number's shape suggests at a glance.
 - **A genuinely important correction**: the APIM deploy turned out to also be the first real deployment of this entire chapter's multi-agent graph — it had been proven locally for a while, but had never actually been redeployed to the live worker until this session's rebuild. Worth naming directly rather than letting a milestone hide inside an unrelated change.
-- Phase 5 still open: Skills restructuring and the real three-tier memory model.
+- Skills, genuinely discoverable now instead of hardcoded per-agent — `discover_skills()` scans `skills/` for anything with a `SKILL.md`, and the real proof it's genuine discovery rather than relocated hardcoding is that a second skill added later needs zero agent code changes, not that two skills exist today.
+- Phase 5 down to one real remaining piece: the three-tier memory model. Skills-discovery itself still needs its own deploy step, same as everything else in this project — proven locally first, not yet pushed live.
