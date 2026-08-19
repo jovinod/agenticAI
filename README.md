@@ -50,7 +50,12 @@ flowchart TD
     subgraph RG["Resource Group: alpha-rg  (Central India unless noted)"]
         subgraph ENV["Container Apps Environment: alpha-env"]
             API["Container App: alpha-api\n(external ingress, port 8000)"]
-            Worker["Container App: alpha-worker\n(no ingress, min 1 / max 10 replicas,\nKEDA scale rule: 1 replica per queued msg)"]
+            subgraph WorkerGroup["Container App: alpha-worker\n(no ingress) — KEDA-scaled: 1-10 replicas,\n1 replica per queued msg"]
+                direction LR
+                W1["replica"]
+                W2["replica"]
+                Wdots["···\nup to 10"]
+            end
         end
         ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
         SB["Service Bus Namespace: alpharesearchsb\nqueue: research-jobs"]
@@ -64,14 +69,14 @@ flowchart TD
     User -->|HTTPS| Frontend
     Frontend -->|"HTTPS (VITE_API_URL, baked in at build)"| API
     API -->|"send (send-only key)"| SB
-    SB -->|"listen (listen-only key)"| Worker
+    SB -->|"listen (listen-only key), one msg per replica"| WorkerGroup
     API -->|"read/write (admin user+pass)"| PG
-    Worker -->|"read/write (admin user+pass)"| PG
+    WorkerGroup -->|"read/write (admin user+pass)"| PG
     API -->|"cache check (read) — access key"| Redis
-    Worker -->|"cache write — access key"| Redis
-    Worker -->|"tool-calling + token/cost logging\nOcp-Apim-Subscription-Key"| APIM
+    WorkerGroup -->|"cache write — access key"| Redis
+    WorkerGroup -->|"tool-calling + token/cost logging\nOcp-Apim-Subscription-Key"| APIM
     APIM -->|"managed identity (AAD token)\nno stored key"| OpenAI
-    SB -.->|"KEDA polls queue depth\n(same servicebus-conn secret)"| Worker
+    SB -.->|"KEDA polls queue depth\n(same servicebus-conn secret)"| WorkerGroup
     ENV -.->|pulls images| ACR
     ENV -.->|logs/metrics| LAW
 ```

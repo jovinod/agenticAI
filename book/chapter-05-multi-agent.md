@@ -284,7 +284,7 @@ flowchart LR
 
 ## The Architecture So Far
 
-This is the diagram every chapter has grown, one real piece at a time, since Chapter 1's single box. Everything from Chapters 1–4 stays exactly as it was; this chapter adds one new node (`alpha-research-apim`) and changes one edge — `Worker` no longer calls `alpha-research-openai` directly, it now goes through APIM, which authenticates to Foundry itself via managed identity.
+This is the diagram every chapter has grown, one real piece at a time, since Chapter 1's single box. Everything from Chapters 1–4 stays exactly as it was; this chapter adds one new node (`alpha-research-apim`) and changes one edge — `Worker` no longer calls `alpha-research-openai` directly, it now goes through APIM, which authenticates to Foundry itself via managed identity. The worker is also no longer drawn as a single fixed box: it's a real KEDA-scaled group now, 1 to 10 replicas depending on queue depth, not a single always-one instance the way it was through Chapter 4.
 
 ```mermaid
 flowchart TB
@@ -292,7 +292,14 @@ flowchart TB
     SWA["Azure Static Web Apps<br/>React SPA"]
     API["Container App: alpha-api<br/>FastAPI (external ingress)"]
     SB["Service Bus: alpharesearchsb<br/>queue: research-jobs"]
-    Worker["Container App: alpha-worker<br/>(no ingress, min 1 / max 10 replicas,<br/>KEDA: 1 replica per queued msg)"]
+
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
+    end
+
     PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ token_usage table")]
     Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
     APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
@@ -301,17 +308,20 @@ flowchart TB
     User --> SWA
     SWA -->|HTTPS| API
     API -->|send job, per ticker on miss| SB
-    SB -->|deliver job| Worker
+    SB -->|deliver job, one per replica| WorkerGroup
     API -->|read status| PG
-    Worker -->|write status/result/token-cost| PG
+    WorkerGroup -->|write status/result/token-cost| PG
     API -->|cache check| Redis
-    Worker -->|cache write| Redis
-    Worker -->|"Ocp-Apim-Subscription-Key"| APIM
+    WorkerGroup -->|cache write| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
     APIM -->|"managed identity (AAD token)"| OpenAI
 
     classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
     classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
-    class SWA,API,SB,Worker,PG,Redis,OpenAI existing
+    classDef replica fill:#e8f5e9,stroke:#66bb6a,stroke-width:1px,color:#2e7d32
+    class SWA,API,SB,PG,Redis,OpenAI existing
+    class WorkerGroup existing
+    class W1,W2,Wdots replica
     class APIM new
 ```
 
