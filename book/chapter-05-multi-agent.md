@@ -280,9 +280,31 @@ flowchart LR
 
 Option A is the immediate lever if this ever becomes a real constraint; Option C is the genuine production answer once load is high and predictable enough to justify the extra piece of infrastructure. Neither is built — noted here as real options, not a commitment.
 
+## Worker Autoscaling — Fixed for Real, Unlike the Options Above
+
+Unlike the exploratory Foundry-scaling options, this one is real and deployed: a genuine KEDA `azure-servicebus` scale rule on `alpha-worker`, added and verified the same way as everything else in this project — checked, not assumed.
+
+```bash
+az containerapp update --name alpha-worker --resource-group alpha-rg \
+  --scale-rule-name servicebus-queue-scale \
+  --scale-rule-type azure-servicebus \
+  --scale-rule-metadata "queueName=research-jobs" "messageCount=5" \
+  --scale-rule-auth "connection=servicebus-conn"
+```
+
+Reused the existing `servicebus-conn` secret rather than creating a new one — it was already scoped to `research-jobs` via its own `EntityPath`. Verified independently via `az containerapp show`, not the update command's own success message:
+
+```
+rules: [{"name": "servicebus-queue-scale", "custom": {"type": "azure-servicebus",
+  "metadata": {"queueName": "research-jobs", "messageCount": "5"},
+  "auth": [{"triggerParameter": "connection", "secretRef": "servicebus-conn"}]}}]
+```
+
+Targets roughly one replica per five queued messages, up to the existing `maxReplicas: 10`. **One honest limit on this claim**: the configuration is verified real; watching it actually trigger a live scale-up under real concurrent load hasn't been done yet, since that means submitting enough concurrent tickers to push the queue past five messages — real additional Azure OpenAI spend across multiple replicas, left as a deliberate choice rather than spent unprompted.
+
 ## Where Phase 5 Actually Stands
 
-The multi-agent graph is real, proven, and wired into the worker — genuinely concurrent execution now (measured, not assumed), a genuine cross-signal Risk judgment, and two real concurrency bugs caught before either shipped silently wrong: the `usage_log` last-write-wins trap, and the blocking-`chat()` bug that made "parallel" wiring not actually mean parallel execution. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables), and — as always in this project — an actual deploy and a live check before this chapter is called finished. Also still open, flagged this chapter but not fixed: `alpha-worker` has no real autoscaling rule configured (`rules: null`, verified directly) despite the project's own README previously claiming otherwise — a real gap for a later pass, not a Phase 5 build item.
+The multi-agent graph is real, proven, and wired into the worker — genuinely concurrent execution now (measured, not assumed), a genuine cross-signal Risk judgment, and two real concurrency bugs caught before either shipped silently wrong: the `usage_log` last-write-wins trap, and the blocking-`chat()` bug that made "parallel" wiring not actually mean parallel execution. Worker autoscaling, flagged earlier as a real gap, is now genuinely fixed and verified, not just claimed. Still ahead: restructuring Skills to be genuinely shared and discoverable across agents rather than each agent hardcoding its own tool list (today's News agent still imports `assess_news_sentiment` directly — nothing scans a `skills/` folder and offers it dynamically), the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables), and — as always in this project — an actual deploy and a live check before this chapter is called finished.
 
 ## What Came Out of This Chapter (So Far)
 
@@ -292,4 +314,6 @@ The multi-agent graph is real, proven, and wired into the worker — genuinely c
 - Five real agents, each proven standalone before being wired together — including the first agent in this project (Risk) where an LLM's synthesis is genuinely load-bearing, not a narrative layer on top of numbers that already spoke for themselves.
 - A real LangGraph `StateGraph`, and two real concurrency bugs caught rather than shipped silently wrong: a last-write-wins state-merge trap (fixed with a proper reducer) and a blocking synchronous HTTP call that made "parallel" graph wiring not actually mean parallel execution (fixed by switching to a genuinely async HTTP client) — plus the follow-on timeout gotcha that fix itself surfaced. A concrete lesson that "the code looks concurrent" and "the code IS concurrent" are different claims, and only measuring proves the second one.
 - The Phase 4 hybrid design retired for a principled reason, not just because more code existed: once the graph's own agents did the same deterministic work internally, keeping a separate copy in `worker.py` stopped being cheap insurance and became genuine waste.
+- A real, verified KEDA autoscaling rule on `alpha-worker`, closing a gap this same chapter had only flagged a day earlier — checked with `az containerapp show`, not trusted from a diagram label, the same discipline the concurrency bug itself was caught with.
+- Real scaling options for the Foundry layer worked through as diagrams, explicitly kept separate from what's actually deployed — a distinction this book has held since Chapter 1's "only show what's built," extended here to mean "and never let a speculative diagram be mistaken for one."
 - Phase 5 still open: Skills restructuring, real three-tier memory, and the first live deploy of any of it.

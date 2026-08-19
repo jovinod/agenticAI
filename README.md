@@ -21,7 +21,7 @@ Web page (React SPA, Azure Static Web Apps)        ← ✅ live
 FastAPI (Container App, autoscale on HTTP)          ← ✅ live (alpha-api, external ingress)
    │  writes job → Azure Service Bus queue
    ▼
-Worker (Container App, min 1 replica)               ← ✅ live (alpha-worker, no ingress) — queue-depth autoscaling NOT actually configured (verified: `rules: null`); fixed at 1 replica regardless of queue depth, a real gap not yet built
+Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, no ingress, min 1 / max 10 replicas) — real KEDA azure-servicebus scale rule, ~1 replica per 5 queued messages, verified via `az containerapp show` (not just the update command's success)
    │
    ├─▶ Single agent (LangGraph multi-agent flow is Phase 5) ← ✅ live — real bounded async tool-calling loop, deterministic checks run alongside it, not replaced by it
    │      ├─ calls Azure AI Foundry (gpt-5-mini)         ← ✅ live (tracing still Phase 8)
@@ -50,7 +50,7 @@ flowchart TD
     subgraph RG["Resource Group: alpha-rg  (Central India unless noted)"]
         subgraph ENV["Container Apps Environment: alpha-env"]
             API["Container App: alpha-api\n(external ingress, port 8000)"]
-            Worker["Container App: alpha-worker\n(no ingress, min 1 replica)"]
+            Worker["Container App: alpha-worker\n(no ingress, min 1 / max 10 replicas,\nKEDA scale rule: 1 replica per 5 queued msgs)"]
         end
         ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
         SB["Service Bus Namespace: alpharesearchsb\nqueue: research-jobs"]
@@ -69,6 +69,7 @@ flowchart TD
     API -->|"cache check (read) — access key"| Redis
     Worker -->|"cache write — access key"| Redis
     Worker -->|"tool-calling + token/cost logging — api-key"| OpenAI
+    SB -.->|"KEDA polls queue depth\n(same servicebus-conn secret)"| Worker
     ENV -.->|pulls images| ACR
     ENV -.->|logs/metrics| LAW
 ```
