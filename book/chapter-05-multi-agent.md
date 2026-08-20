@@ -268,6 +268,51 @@ if any(t.status != "done" for t in tasks):
 
 **Deliberately not built yet**: the frontend doesn't display any of this — the data layer is proven first, the same "one piece before the next" discipline this whole project has used throughout. And this hasn't been deployed to Azure yet, still local-only.
 
+## Profile Memory: Facts About a Ticker, Not a Person
+
+The "entity" this tier tracks is a **ticker**, not a user — no accounts exist in this app at all. Real payoff came almost free: `fetch_stock_data()` already calls `yfinance`'s `.info` for price and P/E data, and that same response includes `sector` and `industry` — genuinely useful profile data that was already being fetched and simply discarded until now.
+
+```python
+# tools/stock_data.py
+"sector": info.get("sector"),
+"industry": info.get("industry"),
+```
+
+The table itself, unique on `(ticker, market)` — the same market-as-a-genuine-dimension discipline as the per-ticker Redis cache and `TickerJob`, not conflating a US ticker with an India one that happens to share a symbol string:
+
+```python
+class TickerProfile(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("ticker", "market"),)
+    ticker: str
+    market: str
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    first_researched_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
+    last_researched_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
+    research_count: int = 1
+```
+
+Agents never touch Postgres directly in this project — that separation held here too. The upsert lives in `worker.py`, right alongside the existing `TokenUsage` write, not inside any agent:
+
+```python
+def _upsert_ticker_profile(session, ticker, market, sector, industry):
+    profile = session.exec(select(TickerProfile).where(
+        TickerProfile.ticker == ticker, TickerProfile.market == market
+    )).first()
+    if profile is None:
+        profile = TickerProfile(ticker=ticker, market=market, sector=sector, industry=industry)
+    else:
+        profile.research_count += 1
+        profile.last_researched_at = datetime.utcnow()
+        ...
+    session.add(profile)
+    session.commit()
+```
+
+Verified in two stages, cheapest first: the upsert logic in isolation — no LLM spend at all — confirmed a second call increments `research_count` to 2 without creating a duplicate row, while `first_researched_at` stays fixed and `last_researched_at` moves. Only *then* one real end-to-end run through `process_ticker` (`MSFT`), confirming the actual wiring: real `sector` (`Technology`) and `industry` (`Software - Infrastructure`) landed correctly, not just plausible-looking test data.
+
+This is deliberately the opposite lookup shape from the semantic tier still to come: exact key (`ticker`, `market`) → one row, never "find me rows *like* this one." Both are real memory; they just answer different questions.
+
 ## Key Files From This Chapter
 
 | File | What it does |
@@ -285,7 +330,9 @@ if any(t.status != "done" for t in tasks):
 | `backend/worker/agents/graph.py` | The real LangGraph `StateGraph` — parallel fan-out, fan-in to Risk, then Synthesizer; the `usage_log` reducer fix lives here. Now also carries `job_id` in its state and writes short-term progress after every node. |
 | `backend/worker/memory/short_term.py` | `write_progress()` / `read_progress()` — per-`(job_id, ticker)` agent progress in Redis, short TTL, distinct from the existing per-ticker result cache. |
 | `backend/api/main.py` | `_read_progress()` — a read-only duplicate of the above (separate `uv` project); `GET /research/{job_id}` now surfaces live partial progress while a job is running. |
-| `backend/worker/worker.py` | `process_ticker` now calls the graph directly, retiring the Phase 4 hybrid; its call to `run_research()` updated for the new `job_id` argument. |
+| `backend/worker/tools/stock_data.py` | `fetch_stock_data()` now also returns `sector`/`industry` — free from the same `yfinance` call, previously fetched and discarded. |
+| `backend/worker/models.py` | New `TickerProfile` table — unique on `(ticker, market)`, exact-key profile facts. |
+| `backend/worker/worker.py` | `process_ticker` now calls the graph directly, retiring the Phase 4 hybrid; its call to `run_research()` updated for the new `job_id` argument; `_upsert_ticker_profile()` writes profile memory alongside the existing `TokenUsage` write. |
 | `backend/worker/llm/model_client.py` | `chat()` switched from blocking `requests` to genuinely async `httpx.AsyncClient` — the fix that made the graph's parallel wiring actually run in parallel. Also later routed through APIM (subscription key auth) instead of calling Foundry directly. |
 
 ## The Flow So Far
@@ -404,7 +451,7 @@ flowchart TB
 
 **A correction worth stating plainly rather than burying**: deploying the APIM change turned out to also be the *first real deploy of the entire multi-agent graph itself*. `worker.py` had been calling `agents.graph.run_research()` for a while, entirely proven locally — but the live worker was still running the Phase 4 single-agent code until this session's rebuild picked up everything that had accumulated since. The real live test that proved APIM worked (`GOOGL`, a genuine four-section report — fundamentals, technical, news, risk, synthesized — returned through the real deployed API) was, at the same time, the first live proof of this whole chapter's actual subject.
 
-So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, a real APIM layer in front of Foundry, and Skills genuinely discoverable rather than hardcoded per-agent — all confirmed against actual running Azure infrastructure, including a real live regression check after the Skills deploy. The three-tier memory model is underway: **short-term (Redis) is built and proven locally**, verified with a real concurrent test watching progress fill in live. Profile (Postgres, exact-key ticker facts) and semantic (`pgvector`, recall by meaning — needs a real new embeddings-deployment decision first) are still ahead, and short-term memory itself hasn't been deployed to Azure yet.
+So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, a real APIM layer in front of Foundry, and Skills genuinely discoverable rather than hardcoded per-agent — all confirmed against actual running Azure infrastructure, including a real live regression check after the Skills deploy. Two of the three memory tiers are now built and proven locally: **short-term (Redis)**, verified with a real concurrent test watching progress fill in live, and **profile (Postgres, exact-key ticker facts)**, verified isolated first then end to end with real sector/industry data. Only **semantic (`pgvector`, recall by meaning)** remains — it genuinely needs a new decision first (an embeddings model deployment), unlike the other two, which needed zero new infrastructure. Neither short-term nor profile memory has been deployed to Azure yet.
 
 ## What Came Out of This Chapter (So Far)
 
@@ -422,4 +469,5 @@ So: the multi-agent graph is real, proven, **and now genuinely deployed and veri
 - Skills discovery deployed and verified live (real `TSLA` job, News correctly flagging genuine safety recalls via the dynamically-discovered skill, not the old hardcoded import) — a real regression check confirming identical behavior through a completely different discovery mechanism.
 - Short-term memory: real per-`(job_id, ticker)` progress in Redis, verified with a genuinely concurrent test — a poller and the graph running as two real coroutines at once, watching agents actually appear one by one as they finished, not simulated.
 - A precise understanding of `pgvector` (a Postgres extension turning existing infrastructure into a vector store, not a new service) versus Azure AI Search (a genuinely separate, more full-featured Azure-native alternative) — and the real gap that `pgvector` stores and searches vectors but doesn't generate them, meaning the semantic tier needs its own new embeddings-deployment decision before any code gets written for it.
-- Phase 5 down to two real remaining pieces: profile memory and semantic memory — short-term is done, proven, not yet deployed.
+- Profile memory: real ticker facts (sector, industry, research count, first/last researched) at effectively zero new cost — the underlying data was already being fetched and discarded. Verified cheapest-first: isolated upsert logic before spending on a real end-to-end LLM run.
+- Phase 5 down to one real remaining piece: semantic memory — short-term and profile are both done, proven, not yet deployed.

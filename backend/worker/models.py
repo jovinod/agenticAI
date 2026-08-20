@@ -30,3 +30,21 @@ class TokenUsage(SQLModel, table=True):
     total_tokens: int
     estimated_cost_usd: float
     created_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
+
+
+# Profile memory -- durable facts about a TICKER (the entity being researched;
+# no user accounts exist yet, so "profile" means this, not a person), looked
+# up by exact key, never searched semantically -- the deliberate opposite of
+# the semantic (pgvector) tier still to come. Worker-only, same reasoning as
+# TokenUsage: only the worker touches this table today.
+class TickerProfile(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("ticker", "market"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ticker: str = Field(index=True)
+    market: str
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    first_researched_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
+    last_researched_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
+    research_count: int = 1

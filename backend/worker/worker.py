@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
-from models import TickerJob, TokenUsage
+from models import TickerJob, TokenUsage, TickerProfile
 from agents.graph import run_research
 from llm.model_client import AZURE_OPENAI_DEPLOYMENT
 
@@ -40,6 +40,29 @@ def seconds_until_midnight():
     now = datetime.now()
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return int((midnight - now).total_seconds())
+
+
+def _upsert_ticker_profile(session, ticker: str, market: str, sector, industry):
+    """Profile memory -- durable facts about this ticker, exact key lookup
+    (ticker, market), unrelated to any single job. A new ticker gets a fresh
+    row; a repeat gets its research_count bumped and last_researched_at
+    refreshed, in place."""
+    profile = session.exec(
+        select(TickerProfile).where(TickerProfile.ticker == ticker, TickerProfile.market == market)
+    ).first()
+
+    if profile is None:
+        profile = TickerProfile(ticker=ticker, market=market, sector=sector, industry=industry)
+    else:
+        profile.research_count += 1
+        profile.last_researched_at = datetime.utcnow()
+        if sector:
+            profile.sector = sector
+        if industry:
+            profile.industry = industry
+
+    session.add(profile)
+    session.commit()
 
 
 async def process_ticker(job_id: str, ticker: str, market: str):
@@ -83,6 +106,9 @@ async def process_ticker(job_id: str, ticker: str, market: str):
                 estimated_cost_usd=usage["estimated_cost_usd"],
             ))
             session.commit()
+
+        with Session(engine) as session:
+            _upsert_ticker_profile(session, ticker, market, data.get("sector"), data.get("industry"))
     print(f"{ticker} done.")
 
     result = {"tickers": [ticker], "summary": [summary_line]}

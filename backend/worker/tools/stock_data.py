@@ -38,6 +38,11 @@ def fetch_stock_data(ticker: str, market: str) -> dict:
                 "market_cap": info.get("marketCap"),
                 "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
                 "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
+                # Free from the same yfinance call, previously unused -- real
+                # payoff now: profile memory (worker.py) uses these directly,
+                # no extra API call needed.
+                "sector": info.get("sector"),
+                "industry": info.get("industry"),
             }
 
     exchanges = "US markets" if market == "US" else "NSE or BSE"
