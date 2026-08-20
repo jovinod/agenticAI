@@ -56,7 +56,7 @@ async def process_ticker(job_id: str, ticker: str, market: str):
     # Risk (deterministic flag_risk_factors + cross-signal judgment) waits for
     # all three, Synthesizer runs last. No separate direct calls here anymore --
     # the graph's own Fundamentals/Risk agents already do that internally.
-    graph_result = await run_research(ticker, market)
+    graph_result = await run_research(job_id, ticker, market)
     data = graph_result.get("fundamentals_data", {})
 
     if not data or "error" in data:

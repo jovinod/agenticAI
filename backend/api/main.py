@@ -98,6 +98,19 @@ async def create_research(request: ResearchRequest):
     return {"job_id": job_id}
 
 
+async def _read_progress(job_id: str, ticker: str) -> dict:
+    """Read-only duplicate of worker/memory/short_term.py's read_progress --
+    backend/api and backend/worker are separate uv projects (same reason
+    TickerJob is duplicated in both models.py files), and only the worker
+    ever WRITES progress, so only the read side needs to exist here."""
+    progress = {}
+    for agent_name in ("fundamentals", "technical", "news", "risk", "synthesizer"):
+        value = await app.state.redis.get(f"progress:{job_id}:{ticker}:{agent_name}")
+        if value is not None:
+            progress[agent_name] = value
+    return progress
+
+
 @app.get("/research/{job_id}")
 async def get_research(job_id: str):
     with Session(engine) as session:
@@ -107,7 +120,11 @@ async def get_research(job_id: str):
         return {"error": "not found"}
 
     if any(t.status != "done" for t in tasks):
-        return {"status": "running"}
+        progress = {}
+        for t in tasks:
+            if t.status != "done":
+                progress[t.ticker] = await _read_progress(job_id, t.ticker)
+        return {"status": "running", "progress": progress}
 
     tickers = []
     summary = []

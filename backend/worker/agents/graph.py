@@ -8,14 +8,20 @@ goes through the same shared agent_harness.py.
 
 News, Fundamentals, and Technical run in parallel (none depend on each
 other's output); Risk waits for all three; Synthesizer runs last.
+
+Each node also writes its own result to short-term memory (memory/short_term.py)
+as soon as it finishes -- so a still-running job has real partial progress to
+show, not just silence until the whole graph completes.
 """
 import operator
 from typing import Annotated, TypedDict
 from langgraph.graph import StateGraph, START, END
 from agents import fundamentals_agent, technical_agent, news_agent, risk_agent, synthesizer_agent
+from memory.short_term import write_progress
 
 
 class ResearchState(TypedDict):
+    job_id: str
     ticker: str
     market: str
     fundamentals_data: dict
@@ -41,25 +47,31 @@ def _empty_usage() -> dict:
 
 async def fundamentals_node(state: ResearchState) -> dict:
     result = await fundamentals_agent.run(state["ticker"], state["market"])
+    summary = result.get("answer") or result.get("error", "Fundamentals data unavailable.")
+    await write_progress(state["job_id"], state["ticker"], "fundamentals", summary)
     return {
         "fundamentals_data": result.get("data", {}),
-        "fundamentals_summary": result.get("answer") or result.get("error", "Fundamentals data unavailable."),
+        "fundamentals_summary": summary,
         "usage_log": [result.get("usage", {})],
     }
 
 
 async def technical_node(state: ResearchState) -> dict:
     result = await technical_agent.run(state["ticker"], state["market"])
+    summary = result.get("answer") or result.get("error", "Technical data unavailable.")
+    await write_progress(state["job_id"], state["ticker"], "technical", summary)
     return {
-        "technical_summary": result.get("answer") or result.get("error", "Technical data unavailable."),
+        "technical_summary": summary,
         "usage_log": [result.get("usage", {})],
     }
 
 
 async def news_node(state: ResearchState) -> dict:
     result = await news_agent.run(state["ticker"], state["market"])
+    summary = result.get("answer", "News assessment unavailable.")
+    await write_progress(state["job_id"], state["ticker"], "news", summary)
     return {
-        "news_summary": result.get("answer", "News assessment unavailable."),
+        "news_summary": summary,
         "usage_log": [result.get("usage", {})],
     }
 
@@ -71,8 +83,10 @@ async def risk_node(state: ResearchState) -> dict:
         state.get("technical_summary", ""),
         state.get("news_summary", ""),
     )
+    summary = result.get("answer", "Risk assessment unavailable.")
+    await write_progress(state["job_id"], state["ticker"], "risk", summary)
     return {
-        "risk_summary": result.get("answer", "Risk assessment unavailable."),
+        "risk_summary": summary,
         "risk_flags": result.get("flags", []),
         "usage_log": [result.get("usage", {})],
     }
@@ -86,8 +100,10 @@ async def synthesizer_node(state: ResearchState) -> dict:
         state.get("news_summary", ""),
         state.get("risk_summary", ""),
     )
+    summary = result.get("answer", "Report unavailable.")
+    await write_progress(state["job_id"], state["ticker"], "synthesizer", summary)
     return {
-        "final_report": result.get("answer", "Report unavailable."),
+        "final_report": summary,
         "usage_log": [result.get("usage", {})],
     }
 
@@ -116,9 +132,10 @@ def build_graph():
     return builder.compile()
 
 
-async def run_research(ticker: str, market: str) -> dict:
+async def run_research(job_id: str, ticker: str, market: str) -> dict:
     graph = build_graph()
     initial_state: ResearchState = {
+        "job_id": job_id,
         "ticker": ticker,
         "market": market,
         "fundamentals_data": {},
@@ -143,7 +160,7 @@ async def run_research(ticker: str, market: str) -> dict:
 
 if __name__ == "__main__":
     import asyncio
-    final = asyncio.run(run_research("AAPL", "US"))
+    final = asyncio.run(run_research("standalone-test-job", "AAPL", "US"))
     print(final["final_report"])
     print()
     print("Risk flags:", final["risk_flags"])

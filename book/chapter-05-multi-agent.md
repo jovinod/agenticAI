@@ -234,6 +234,40 @@ TOOL_REGISTRY = {"search_web": search_via_mcp, **_skill_registry}
 
 **The real proof this is genuine discovery, not just moved hardcoding, isn't that two skills exist today — there's still only one.** It's that adding a *second* discoverable skill later requires editing exactly one thing: a new folder under `skills/` with its own `SKILL.md`. No agent's code changes at all, `news_agent.py` included. Verified standalone first (`discover_skills()` correctly finds `assess_news_sentiment`, correctly skips `flag_risk_factors`), then end to end (`news_agent.run("AAPL", "US")` — real search, the skill genuinely discovered and applied, identical quality of reasoning to before, now reached through a mechanism instead of an import).
 
+## Three-Tier Memory: Short-Term First
+
+`phases.md`'s real three-tier memory model has three parts, each solving a genuinely different problem: **short-term** (Redis, ephemeral, what's happening in this job right now), **semantic** (`pgvector` on the existing Postgres, recall past findings *by meaning*), and **profile** (plain Postgres tables, durable facts about a ticker, looked up by exact key). Semantic needs a real new decision first — an embeddings model deployment, since `pgvector` stores and searches vectors but doesn't generate them — so it's deliberately last. Short-term needed no new infrastructure at all and has an immediate, concrete payoff, so it went first.
+
+**The actual gap it closes**: the existing per-ticker Redis cache (`research:{market}:{ticker}:{date}`, Chapter 3) is a *result* cache — it's only written once a ticker's whole graph finishes. While a job is running, `GET /research/{job_id}` had nothing to say beyond `{"status": "running"}`, no matter how close to done it actually was. Short-term memory writes each agent's own result the moment *it* finishes, not when the whole graph does:
+
+```python
+# agents/graph.py
+async def fundamentals_node(state: ResearchState) -> dict:
+    result = await fundamentals_agent.run(state["ticker"], state["market"])
+    summary = result.get("answer") or result.get("error", "Fundamentals data unavailable.")
+    await write_progress(state["job_id"], state["ticker"], "fundamentals", summary)
+    return {...}
+```
+
+Every other node does the same after its own call. This needed a real signature change, not just a new file: `ResearchState` never had a `job_id` field at all before this — the graph genuinely didn't know what job it was part of, since nothing before this needed to. `run_research()` now takes `job_id` as its first argument, and `worker.py`'s call site was updated to match.
+
+**Verified with a real concurrent test, not a unit-level one** — ran the graph while polling `read_progress()` from a separate task at the same time, and watched agents genuinely appear one at a time as they actually finished, in real time: `technical` first (fastest), then `fundamentals` joined it, then `news` after its search calls completed, then `risk`, then all five. Not simulated — the polling task and the graph were two real concurrent coroutines, and the interleaving in the output *is* the proof.
+
+`backend/api/main.py`'s `GET /research/{job_id}` now surfaces this while a job is in flight:
+
+```python
+if any(t.status != "done" for t in tasks):
+    progress = {}
+    for t in tasks:
+        if t.status != "done":
+            progress[t.ticker] = await _read_progress(job_id, t.ticker)
+    return {"status": "running", "progress": progress}
+```
+
+**One real complication, not a new one — the same shape as `TickerJob`'s existing duplication**: `backend/api` and `backend/worker` are separate `uv` projects, so `main.py` can't import `memory/short_term.py` directly. Since only the worker ever *writes* progress, only a small **read-only** duplicate was needed on the API side — verified genuinely compatible, not just similar-looking, by reading real progress data the worker had written moments earlier from the API's completely separate Python project.
+
+**Deliberately not built yet**: the frontend doesn't display any of this — the data layer is proven first, the same "one piece before the next" discipline this whole project has used throughout. And this hasn't been deployed to Azure yet, still local-only.
+
 ## Key Files From This Chapter
 
 | File | What it does |
@@ -248,8 +282,10 @@ TOOL_REGISTRY = {"search_web": search_via_mcp, **_skill_registry}
 | `backend/worker/skills/discovery.py` | `discover_skills()` — scans `skills/` for any folder with a `SKILL.md`, builds tool schemas + a registry dynamically. Adding a new discoverable skill needs zero agent code changes. |
 | `backend/worker/agents/risk_agent.py` | Deterministic `flag_risk_factors` + cross-signal synthesis over the other three agents' outputs. |
 | `backend/worker/agents/synthesizer_agent.py` | Combines all four into the final report. |
-| `backend/worker/agents/graph.py` | The real LangGraph `StateGraph` — parallel fan-out, fan-in to Risk, then Synthesizer; the `usage_log` reducer fix lives here. |
-| `backend/worker/worker.py` | `process_ticker` now calls the graph directly, retiring the Phase 4 hybrid. |
+| `backend/worker/agents/graph.py` | The real LangGraph `StateGraph` — parallel fan-out, fan-in to Risk, then Synthesizer; the `usage_log` reducer fix lives here. Now also carries `job_id` in its state and writes short-term progress after every node. |
+| `backend/worker/memory/short_term.py` | `write_progress()` / `read_progress()` — per-`(job_id, ticker)` agent progress in Redis, short TTL, distinct from the existing per-ticker result cache. |
+| `backend/api/main.py` | `_read_progress()` — a read-only duplicate of the above (separate `uv` project); `GET /research/{job_id}` now surfaces live partial progress while a job is running. |
+| `backend/worker/worker.py` | `process_ticker` now calls the graph directly, retiring the Phase 4 hybrid; its call to `run_research()` updated for the new `job_id` argument. |
 | `backend/worker/llm/model_client.py` | `chat()` switched from blocking `requests` to genuinely async `httpx.AsyncClient` — the fix that made the graph's parallel wiring actually run in parallel. Also later routed through APIM (subscription key auth) instead of calling Foundry directly. |
 
 ## The Flow So Far
@@ -368,7 +404,7 @@ flowchart TB
 
 **A correction worth stating plainly rather than burying**: deploying the APIM change turned out to also be the *first real deploy of the entire multi-agent graph itself*. `worker.py` had been calling `agents.graph.run_research()` for a while, entirely proven locally — but the live worker was still running the Phase 4 single-agent code until this session's rebuild picked up everything that had accumulated since. The real live test that proved APIM worked (`GOOGL`, a genuine four-section report — fundamentals, technical, news, risk, synthesized — returned through the real deployed API) was, at the same time, the first live proof of this whole chapter's actual subject.
 
-So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, a real APIM layer in front of Foundry, and Skills genuinely discoverable rather than hardcoded per-agent — all confirmed against actual running Azure infrastructure, including a real live regression check after the Skills deploy. Only one real piece of the original Phase 5 roadmap remains: the real three-tier memory model (short-term Redis, semantic `pgvector`, profile Postgres tables).
+So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, a real APIM layer in front of Foundry, and Skills genuinely discoverable rather than hardcoded per-agent — all confirmed against actual running Azure infrastructure, including a real live regression check after the Skills deploy. The three-tier memory model is underway: **short-term (Redis) is built and proven locally**, verified with a real concurrent test watching progress fill in live. Profile (Postgres, exact-key ticker facts) and semantic (`pgvector`, recall by meaning — needs a real new embeddings-deployment decision first) are still ahead, and short-term memory itself hasn't been deployed to Azure yet.
 
 ## What Came Out of This Chapter (So Far)
 
@@ -384,4 +420,6 @@ So: the multi-agent graph is real, proven, **and now genuinely deployed and veri
 - **A genuinely important correction**: the APIM deploy turned out to also be the first real deployment of this entire chapter's multi-agent graph — it had been proven locally for a while, but had never actually been redeployed to the live worker until this session's rebuild. Worth naming directly rather than letting a milestone hide inside an unrelated change.
 - Skills, genuinely discoverable now instead of hardcoded per-agent — `discover_skills()` scans `skills/` for anything with a `SKILL.md`, and the real proof it's genuine discovery rather than relocated hardcoding is that a second skill added later needs zero agent code changes, not that two skills exist today.
 - Skills discovery deployed and verified live (real `TSLA` job, News correctly flagging genuine safety recalls via the dynamically-discovered skill, not the old hardcoded import) — a real regression check confirming identical behavior through a completely different discovery mechanism.
-- Phase 5 down to one real remaining piece: the three-tier memory model.
+- Short-term memory: real per-`(job_id, ticker)` progress in Redis, verified with a genuinely concurrent test — a poller and the graph running as two real coroutines at once, watching agents actually appear one by one as they finished, not simulated.
+- A precise understanding of `pgvector` (a Postgres extension turning existing infrastructure into a vector store, not a new service) versus Azure AI Search (a genuinely separate, more full-featured Azure-native alternative) — and the real gap that `pgvector` stores and searches vectors but doesn't generate them, meaning the semantic tier needs its own new embeddings-deployment decision before any code gets written for it.
+- Phase 5 down to two real remaining pieces: profile memory and semantic memory — short-term is done, proven, not yet deployed.
