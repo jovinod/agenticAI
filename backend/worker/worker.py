@@ -4,6 +4,7 @@ import os
 from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
+from azure.servicebus import ServiceBusMessage
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from models import TickerJob, TokenUsage, TickerProfile
@@ -21,6 +22,14 @@ engine = create_engine(DATABASE_URL)
 
 SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
+
+# Semantic memory's write side lives in a separate deployable (embed-worker),
+# not here -- this worker only publishes a message and moves on, so a slow or
+# failing embeddings call never blocks the actual research pipeline. Own
+# queue, own SAS scope (send-only), same reasoning as research-jobs' own
+# separate send-only/listen-only rules.
+SERVICEBUS_EMBED_CONNECTION_STRING = os.environ.get("SERVICEBUS_EMBED_CONNECTION_STRING")
+SERVICEBUS_EMBED_QUEUE_NAME = os.environ.get("SERVICEBUS_EMBED_QUEUE_NAME", "embedding-jobs")
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6380"))
@@ -65,7 +74,7 @@ def _upsert_ticker_profile(session, ticker: str, market: str, sector, industry):
     session.commit()
 
 
-async def process_ticker(job_id: str, ticker: str, market: str):
+async def process_ticker(job_id: str, ticker: str, market: str, embed_sender):
     with Session(engine) as session:
         task = session.exec(
             select(TickerJob).where(TickerJob.job_id == job_id, TickerJob.ticker == ticker)
@@ -109,6 +118,16 @@ async def process_ticker(job_id: str, ticker: str, market: str):
 
         with Session(engine) as session:
             _upsert_ticker_profile(session, ticker, market, data.get("sector"), data.get("industry"))
+
+        # Semantic memory: publish, don't embed inline -- embed-worker owns the
+        # actual Foundry call and the ResearchReport write, so a slow or failing
+        # embeddings call never adds latency to this job's own completion.
+        report_text = graph_result.get("final_report", "")
+        if report_text:
+            embed_message = json.dumps({
+                "job_id": job_id, "ticker": ticker, "market": market, "report_text": report_text,
+            })
+            await embed_sender.send_messages(ServiceBusMessage(embed_message))
     print(f"{ticker} done.")
 
     result = {"tickers": [ticker], "summary": [summary_line]}
@@ -129,12 +148,16 @@ async def process_ticker(job_id: str, ticker: str, market: str):
 
 async def main():
     client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
-    async with client:
-        async with client.get_queue_receiver(queue_name=SERVICEBUS_QUEUE_NAME) as receiver:
+    embed_client = ServiceBusClient.from_connection_string(SERVICEBUS_EMBED_CONNECTION_STRING)
+    async with client, embed_client:
+        async with (
+            client.get_queue_receiver(queue_name=SERVICEBUS_QUEUE_NAME) as receiver,
+            embed_client.get_queue_sender(queue_name=SERVICEBUS_EMBED_QUEUE_NAME) as embed_sender,
+        ):
             print("Worker started, waiting for messages...")
             async for msg in receiver:
                 data = json.loads(str(msg))
-                await process_ticker(data["job_id"], data["ticker"], data["market"])
+                await process_ticker(data["job_id"], data["ticker"], data["market"], embed_sender)
                 await receiver.complete_message(msg)  # acknowledge — without this, Service Bus redelivers it
 
 

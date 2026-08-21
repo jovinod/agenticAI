@@ -56,27 +56,34 @@ flowchart TD
                 W2["replica"]
                 Wdots["···\nup to 10"]
             end
+            EmbedWorker["Container App: alpha-embed-worker\n(no ingress) — KEDA-scaled: 0-3 replicas,\n1 replica per 5 queued msgs — separate from\nalpha-worker so a slow/failing embedding call\nnever blocks the research pipeline"]
         end
         ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
-        SB["Service Bus Namespace: alpharesearchsb\nqueue: research-jobs"]
-        PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha (+ token_usage table)")]
+        SB["Service Bus Namespace: alpharesearchsb\nqueues: research-jobs, embedding-jobs"]
+        PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha — tickerjob, tokenusage,\ntickerprofile, researchreport (pgvector)")]
         Redis[("Managed Redis:\nalpha-research-cache\nport 10000, TLS, key auth")]
         LAW["Log Analytics workspace:\nworkspace-alphargK2N9\n(auto-created by alpha-env)"]
         APIM["API Management: alpha-research-apim\n(Consumption tier, managed identity)"]
-        OpenAI["Azure OpenAI: alpha-research-openai (South India)\ndeployment: gpt-5-mini"]
+        OpenAI["Azure OpenAI: alpha-research-openai (South India)\ndeployments: gpt-5-mini, text-embedding-3-small"]
     end
 
     User -->|HTTPS| Frontend
     Frontend -->|"HTTPS (VITE_API_URL, baked in at build)"| API
     API -->|"send (send-only key)"| SB
     SB -->|"listen (listen-only key), one msg per replica"| WorkerGroup
+    SB -->|"listen (listen-only key), embedding-jobs"| EmbedWorker
     API -->|"read/write (admin user+pass)"| PG
     WorkerGroup -->|"read/write (admin user+pass)"| PG
+    EmbedWorker -->|"write — vector embedding\n(admin user+pass)"| PG
     API -->|"cache check (read) — access key"| Redis
     WorkerGroup -->|"cache write — access key"| Redis
     WorkerGroup -->|"tool-calling + token/cost logging\nOcp-Apim-Subscription-Key"| APIM
+    WorkerGroup -->|"publish report text\n(send-only key), embedding-jobs"| SB
+    EmbedWorker -->|"embed report text\nOcp-Apim-Subscription-Key"| APIM
+    API -->|"embed search query\nOcp-Apim-Subscription-Key"| APIM
     APIM -->|"managed identity (AAD token)\nno stored key"| OpenAI
     SB -.->|"KEDA polls queue depth\n(same servicebus-conn secret)"| WorkerGroup
+    SB -.->|"KEDA polls queue depth"| EmbedWorker
     ENV -.->|pulls images| ACR
     ENV -.->|logs/metrics| LAW
 ```

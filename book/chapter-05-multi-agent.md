@@ -313,6 +313,23 @@ Verified in two stages, cheapest first: the upsert logic in isolation — no LLM
 
 This is deliberately the opposite lookup shape from the semantic tier still to come: exact key (`ticker`, `market`) → one row, never "find me rows *like* this one." Both are real memory; they just answer different questions.
 
+## Semantic Memory: A Real Search Feature, Not a Forced Fit
+
+The obvious next step after profile memory looked like: embed each synthesized report, store the vector alongside the text, and have an agent recall "similar past reports" as extra context before writing its own. That's the textbook RAG shape — and it was almost built that way. A direct question caught it first: **does this app actually need that?**
+
+It didn't, honestly. The graph already gets fresh, real, deterministic data every run — it doesn't need narrative precedent to reason well. There's no outcome tracking, so "recall a similar past report" isn't grounding the agent in anything verified; it's just handing it someone else's prior opinion dressed up as memory, more likely to bias the synthesis than improve it. The idea fit the *pattern* vector embeddings are good at (context enrichment, few-shot retrieval) without fitting a *real need this app has*. Reaching for a technology because it was on the original roadmap, rather than because something was missing, is exactly the kind of forced fit worth naming and rejecting rather than building anyway.
+
+The version that survived scrutiny: a **standalone search feature**, genuinely decoupled from the agent graph. A human asks a free-form question — "creative software company with an AI growth narrative" — and gets back the most semantically similar past reports, regardless of ticker. This is the one case that's *actually* unanswerable by an exact key: no `ticker`, no `date`, no `sector` filter captures "similar in meaning." Nothing about how the five agents reason changes; this only adds a new, separate way to ask the system a question after the fact.
+
+**A third deployable, not a new responsibility bolted onto an existing one.** The natural first instinct — embed the report right inside `worker.py`, next to the profile-memory write — was rejected for the same reason short-term memory's write path stays cheap: a slow or failing Foundry embeddings call has no business adding latency to a ticker's own completion, especially with the KEDA rule tuned aggressively (`messageCount=1`) specifically for the *research* pipeline, not for background embedding work. So `alpha-worker` now does one new thing after finishing a ticker — publish `{job_id, ticker, market, report_text}` to a new `embedding-jobs` queue — and moves on immediately. A new, separate `alpha-embed-worker` (its own `uv` project, own image, own Container App) consumes that queue, calls the embeddings deployment, and writes the row. It scales `0→3` replicas with a gentler `messageCount=5` rule, deliberately not matching `research-jobs`' aggressive tuning — this is low-volume, non-user-facing work, fine to cold-start on demand. `backend/worker` doesn't gain a `pgvector` dependency at all; it never touches the table.
+
+Two real infrastructure gotchas surfaced building this:
+
+- **`pgvector` isn't in the local dev Postgres image.** The `postgres:16-alpine` container had been running fine for weeks, but `CREATE EXTENSION vector` failed outright — the extension binary simply isn't compiled into that image. Fixed by swapping to the official `pgvector/pgvector:pg16` image, same Postgres major version, and reattaching the *same* underlying Docker volume rather than starting fresh — verified the swap first (`SELECT count(*) FROM tickerprofile`, confirming existing rows survived) before removing the old container. On Azure, the equivalent step is different in kind, not just location: Azure Database for PostgreSQL Flexible Server requires the extension explicitly allowlisted at the server level (`az postgres flexible-server parameter set --name azure.extensions --value VECTOR`) before `CREATE EXTENSION vector` will succeed at all — a managed-service guardrail with no local equivalent.
+- **A new Foundry deployment took far longer to become reachable through APIM than expected.** `text-embedding-3-small` deployed successfully and confirmed `Succeeded` via `az cognitiveservices account deployment list`, and calling it *directly* against Foundry (bypassing APIM entirely, with a real AAD token) worked within seconds. But the same call routed through APIM kept returning `DeploymentNotFound` for several minutes — long enough to genuinely suspect a routing or RBAC bug, not just propagation delay. Checked RBAC directly rather than assumed: APIM's managed identity's `principalId` matched correctly (a `-o table` output had briefly looked like a mismatch — it was just displaying `principalName` under the "Principal" column, not `principalId` — a real reminder to check raw JSON before trusting a formatted table), and the `Cognitive Services OpenAI User` role definition does include the `deployments/embeddings/action` data action. Everything was correctly configured; the call simply started working on its own after enough time passed. A genuinely different, longer propagation window than the chat deployment needed back in Chapter 4 — not a bug, just a real, unexplained variance worth remembering before assuming a fresh deployment is broken.
+
+**Verified in stages, same discipline as everything else**: `embed_worker.py` proven in isolation first — a hand-sent fake Service Bus message, consumed, embedded, and stored as a real 1536-dimension vector — before touching the real pipeline. Then a full local run: a real research job through the local API, `worker.py` publishing to `embedding-jobs`, `embed_worker.py` picking it up, and `GET /search` correctly matching a free-form question to the right report by meaning, not keyword overlap. Then the same sequence again, live: a real `ADBE` job through the public API, the embed-worker cold-starting from zero replicas to consume it, and a live `/search` query correctly surfacing the ADBE report for "creative software company with an AI growth narrative" — a phrase that shares almost no words with the report text itself.
+
 ## Key Files From This Chapter
 
 | File | What it does |
@@ -334,6 +351,11 @@ This is deliberately the opposite lookup shape from the semantic tier still to c
 | `backend/worker/models.py` | New `TickerProfile` table — unique on `(ticker, market)`, exact-key profile facts. |
 | `backend/worker/worker.py` | `process_ticker` now calls the graph directly, retiring the Phase 4 hybrid; its call to `run_research()` updated for the new `job_id` argument; `_upsert_ticker_profile()` writes profile memory alongside the existing `TokenUsage` write. |
 | `backend/worker/llm/model_client.py` | `chat()` switched from blocking `requests` to genuinely async `httpx.AsyncClient` — the fix that made the graph's parallel wiring actually run in parallel. Also later routed through APIM (subscription key auth) instead of calling Foundry directly. |
+| `backend/embed-worker/` (new `uv` project) | `models.py` (`ResearchReport`, write-side), `embeddings_client.py`, `embed_worker.py` — consumes `embedding-jobs`, calls the embeddings deployment, writes the vector. Deliberately its own deployable, not folded into `alpha-worker`. |
+| `backend/worker/worker.py` | After the profile-memory write: publishes `{job_id, ticker, market, report_text}` to `embedding-jobs` and moves on — no embeddings client, no `pgvector` dependency in this project at all. |
+| `backend/api/models.py` | Read-side `ResearchReport` duplicate, for `/search`. |
+| `backend/api/llm/embeddings_client.py` (new) | Embeds the incoming search query — this API's first-ever direct call to Foundry. |
+| `backend/api/main.py` | New `GET /search?q=...` — embeds the query, `ORDER BY embedding <-> :qvec LIMIT k` against `ResearchReport`, genuinely decoupled from the agent graph. |
 
 ## The Flow So Far
 
@@ -368,7 +390,7 @@ flowchart TD
     class WorkerPy,Graph,Fund,Tech,News,Risk,Synth,Harness,ModelClient,Discovery,SkillFile file
 ```
 
-## Azure Architecture — Two Real Scaling Pieces Now Deployed
+## Azure Architecture — Three Real Scaling Pieces Now Deployed
 
 Unlike most of this chapter, this section documents changes made in a later session, prompted directly by the reader's own follow-up questions about scaling — not a separate build pass, but real infrastructure added while working through exactly the scaling questions raised below. Both pieces are live, verified, not exploratory.
 
@@ -383,6 +405,8 @@ flowchart LR
 Provisioned with a system-assigned managed identity, granted the `Cognitive Services OpenAI User` role directly on the Foundry resource — APIM authenticates to Foundry itself via a real Azure AD token, acquired fresh per request via the `authentication-managed-identity` policy. The worker no longer holds the raw Foundry API key at all; it only ever sees an APIM subscription key, itself scoped to just this one API. A real, non-obvious gotcha hit setting this up: the API's own client-facing path (`openai`) was being *stripped* by APIM before forwarding to the backend — but Azure OpenAI's actual REST path also starts with `/openai/deployments/...`, so the forwarded request was silently missing that segment, producing a `404` that looked like a routing failure but was actually a path-construction bug. Fixed by giving the API an empty client-facing path, so the full incoming path forwards to the backend unchanged. Verified with a direct `curl` through the whole chain (subscription key → APIM → managed identity token → Foundry → real response) before touching any application code — the same discipline used for every other piece in this project.
 
 **The KEDA scale rule's `messageCount` dropped from 5 to 1** — deliberately aggressive, aiming for roughly one worker replica per queued ticker rather than one per five. Working through the actual formula (`replicas = ceil(queue_length / messageCount)`) surfaced a real, worth-remembering correction: a *higher* `messageCount` means *less* aggressive scaling, not more — the number means "how many messages one replica is expected to handle," so getting "one replica per ticker" required setting it to 1, not to a number that sounded like "2 tickers, 2 replicas." A real, acknowledged tradeoff comes with this: more replicas now compete harder for the same Foundry capacity behind APIM, which doesn't add capacity on its own — just a gateway layer in front of the same 10K TPM. This value is intentionally temporary — the plan is to revert it closer to 5 once the project nears completion, once aggressive per-ticker scaling has served its purpose of exercising the autoscaling path directly.
+
+**A third, deliberately gentler KEDA rule** now runs on `alpha-embed-worker`, tuned differently from `alpha-worker`'s on purpose: `messageCount=5` (not 1) and `minReplicas=0` (not 1). This is background work with no user waiting on it directly — cold-starting from zero when the `embedding-jobs` queue is empty is the right tradeoff here, the opposite of the research pipeline's need to stay warm. Confirmed live: a real job's embedding message was picked up and processed on the very first check after submission, cold start included.
 
 ## Scaling Options — What's Built, What's Still Exploratory
 
@@ -406,14 +430,14 @@ flowchart LR
 
 ## The Architecture So Far
 
-This is the diagram every chapter has grown, one real piece at a time, since Chapter 1's single box. Everything from Chapters 1–4 stays exactly as it was; this chapter adds one new node (`alpha-research-apim`) and changes one edge — `Worker` no longer calls `alpha-research-openai` directly, it now goes through APIM, which authenticates to Foundry itself via managed identity. The worker is also no longer drawn as a single fixed box: it's a real KEDA-scaled group now, 1 to 10 replicas depending on queue depth, not a single always-one instance the way it was through Chapter 4.
+This is the diagram every chapter has grown, one real piece at a time, since Chapter 1's single box. Everything through the APIM/KEDA work above stays exactly as it was; this update adds the semantic-memory pieces built later in this same chapter: a new `alpha-embed-worker` deployable, a new `embedding-jobs` queue, and a second Foundry deployment (`text-embedding-3-small`) alongside the existing `gpt-5-mini`.
 
 ```mermaid
 flowchart TB
     User(["Visitor's browser"])
     SWA["Azure Static Web Apps<br/>React SPA"]
     API["Container App: alpha-api<br/>FastAPI (external ingress)"]
-    SB["Service Bus: alpharesearchsb<br/>queue: research-jobs"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
 
     subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
         direction LR
@@ -422,38 +446,48 @@ flowchart TB
         Wdots["···<br/>up to 10"]
     end
 
-    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ token_usage table")]
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas<br/>(1 replica per 5 queued msgs)"]
+
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ tokenusage, tickerprofile,<br/>researchreport (pgvector)")]
     Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
     APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
-    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — deployment: gpt-5-mini"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — gpt-5-mini,<br/>text-embedding-3-small"]
 
     User --> SWA
     SWA -->|HTTPS| API
     API -->|send job, per ticker on miss| SB
     SB -->|deliver job, one per replica| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
     API -->|read status| PG
     WorkerGroup -->|write status/result/token-cost| PG
+    EmbedWorker -->|write report + vector| PG
+    API -->|"search: read + embed query"| PG
     API -->|cache check| Redis
     WorkerGroup -->|cache write| Redis
     WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
+    WorkerGroup -->|publish report text| SB
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
     APIM -->|"managed identity (AAD token)"| OpenAI
 
     classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
     classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
     classDef replica fill:#e8f5e9,stroke:#66bb6a,stroke-width:1px,color:#2e7d32
-    class SWA,API,SB,PG,Redis,OpenAI existing
+    class SWA,API,SB,PG,Redis,OpenAI,APIM existing
     class WorkerGroup existing
     class W1,W2,Wdots replica
-    class APIM new
+    class EmbedWorker new
 ```
 
 ## Where Phase 5 Actually Stands
 
 **A correction worth stating plainly rather than burying**: deploying the APIM change turned out to also be the *first real deploy of the entire multi-agent graph itself*. `worker.py` had been calling `agents.graph.run_research()` for a while, entirely proven locally — but the live worker was still running the Phase 4 single-agent code until this session's rebuild picked up everything that had accumulated since. The real live test that proved APIM worked (`GOOGL`, a genuine four-section report — fundamentals, technical, news, risk, synthesized — returned through the real deployed API) was, at the same time, the first live proof of this whole chapter's actual subject.
 
-So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, a real APIM layer in front of Foundry, and Skills genuinely discoverable rather than hardcoded per-agent — all confirmed against actual running Azure infrastructure, including a real live regression check after the Skills deploy. Two of the three memory tiers are now built, deployed, and **verified live on Azure**: **short-term (Redis)**, watched filling in live through the real public API (`technical` → `+fundamentals` → `+news` → `+risk`, in real order, before the job resolved), and **profile (Postgres, exact-key ticker facts)**, confirmed with real `sector`/`industry` rows landing correctly in the live Azure database. Only **semantic (`pgvector`, recall by meaning)** remains — it genuinely needs a new decision first (an embeddings model deployment), unlike the other two, which needed zero new infrastructure.
+So: the multi-agent graph is real, proven, **and now genuinely deployed and verified live** — not just locally. Genuinely concurrent execution (measured, not assumed), a genuine cross-signal Risk judgment, two real concurrency bugs caught before either shipped silently wrong, real worker autoscaling, a real APIM layer in front of Foundry, and Skills genuinely discoverable rather than hardcoded per-agent — all confirmed against actual running Azure infrastructure, including a real live regression check after the Skills deploy. All three memory tiers are now built, deployed, and **verified live on Azure**: **short-term (Redis)**, watched filling in live through the real public API; **profile (Postgres, exact-key ticker facts)**, confirmed with real `sector`/`industry` rows landing correctly; and **semantic (`pgvector`, recall by meaning)** — not built the way it was first sketched (auto-injected into agent context), but as a standalone `/search` feature after a direct question about whether the original shape was solving a real problem. Confirmed live end to end: a real job's report embedded by a separate, independently-scaled `alpha-embed-worker`, and a free-form question correctly matched to it through the public API.
 
 **A second "the deploy revealed a gap" moment, same shape as the APIM one above**: rebuilding and redeploying `alpha-worker` wasn't enough on its own. Polling the live job for progress kept returning `{"status":"running"}` with no `progress` key at all — `alpha-api` was still running a revision from 2026-08-15, predating the `_read_progress()` code by five days. The worker's *write* side and the database were genuinely live; the API's *read* side wasn't. Fixed the same way as every other deploy gap this project has hit: rebuild, redeploy with a new `--revision-suffix`, confirm the old revision fully deprovisions, then retest against the real chain rather than trust the fix. Worth stating plainly rather than smoothing over — "the worker is deployed" and "the feature is deployed" are different claims, and only an actual end-to-end request through the public API caught the difference.
+
+**Phase 5 is now genuinely complete** — multi-agent graph, Skills, and all three memory tiers, all built, deployed, and verified against real running Azure infrastructure, not just proven locally and assumed to still work.
 
 ## What Came Out of This Chapter (So Far)
 
@@ -473,4 +507,7 @@ So: the multi-agent graph is real, proven, **and now genuinely deployed and veri
 - A precise understanding of `pgvector` (a Postgres extension turning existing infrastructure into a vector store, not a new service) versus Azure AI Search (a genuinely separate, more full-featured Azure-native alternative) — and the real gap that `pgvector` stores and searches vectors but doesn't generate them, meaning the semantic tier needs its own new embeddings-deployment decision before any code gets written for it.
 - Profile memory: real ticker facts (sector, industry, research count, first/last researched) at effectively zero new cost — the underlying data was already being fetched and discarded. Verified cheapest-first: isolated upsert logic before spending on a real end-to-end LLM run.
 - Short-term and profile memory both deployed to Azure and verified live — including catching a real deploy gap where `alpha-api` had silently gone five days stale, still serving a revision from before the progress-reporting code existed. The worker being redeployed didn't mean the whole feature was; only a real request through the live public API caught it.
-- Phase 5 down to one real remaining piece: semantic memory — short-term and profile are both done, proven, and now live on Azure.
+- A design caught and corrected before being built, not after: the first sketch of semantic memory (auto-inject similar past reports into agent context) fit the RAG *pattern* without answering a real need this app has — no outcome tracking, agents already get fresh real data. Rejected explicitly, replaced with a standalone `/search` feature that's genuinely the only case here an exact key can't answer.
+- A third deployable, `alpha-embed-worker`, added for a principled reason: a slow or failing embeddings call has no business adding latency to the research pipeline's own KEDA rule, tuned aggressively for a completely different concern. Its own queue (`embedding-jobs`), its own gentler scale rule (`0→3` replicas, `messageCount=5`), confirmed live picking up a real job from a cold start.
+- Two real infrastructure gotchas surfaced building this: local dev Postgres needed a genuine image swap (`postgres:16-alpine` → `pgvector/pgvector:pg16`, same volume reattached, verified no data loss) since `pgvector` isn't compiled into the base image; and a freshly deployed Foundry model took several minutes longer to become reachable *through APIM* than calling it directly — real RBAC and routing both checked and found correct before concluding it was propagation delay, not a bug.
+- Phase 5 complete: multi-agent graph, Skills, and all three memory tiers (short-term, profile, semantic) — built, deployed, and verified against real running Azure infrastructure.

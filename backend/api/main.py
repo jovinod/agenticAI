@@ -11,7 +11,8 @@ from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
-from models import TickerJob
+from models import TickerJob, ResearchReport
+from llm.embeddings_client import embed
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
@@ -133,3 +134,33 @@ async def get_research(job_id: str):
         summary.extend(json.loads(t.result)["summary"])
 
     return {"status": "done", "result": {"tickers": tickers, "summary": summary}}
+
+
+@app.get("/search")
+async def search_reports(q: str, limit: int = 5):
+    """Semantic memory's read side -- a human's free-form question, matched
+    against past synthesized reports by meaning, not by ticker/date key.
+    Genuinely decoupled from the agent graph: this doesn't feed back into
+    any agent's context, it's a standalone way to ask "what have we said
+    that's relevant to this," across every ticker researched so far."""
+    query_vector = await embed(q)
+    with Session(engine) as session:
+        reports = session.exec(
+            select(ResearchReport)
+            .order_by(ResearchReport.embedding.cosine_distance(query_vector))
+            .limit(limit)
+        ).all()
+
+    return {
+        "query": q,
+        "results": [
+            {
+                "ticker": r.ticker,
+                "market": r.market,
+                "job_id": r.job_id,
+                "report_text": r.report_text,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in reports
+        ],
+    }
