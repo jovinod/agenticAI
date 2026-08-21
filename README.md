@@ -60,7 +60,7 @@ flowchart TD
         end
         ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
         SB["Service Bus Namespace: alpharesearchsb\nqueues: research-jobs, embedding-jobs"]
-        PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha — tickerjob, tokenusage,\ntickerprofile, researchreport (pgvector)")]
+        PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha — tickerjob, tokenusage,\ntickerprofile, researchreport (pgvector),\ncheckpoints (LangGraph)")]
         Redis[("Managed Redis:\nalpha-research-cache\nport 10000, TLS, key auth")]
         LAW["Log Analytics workspace:\nworkspace-alphargK2N9\n(auto-created by alpha-env)"]
         APIM["API Management: alpha-research-apim\n(Consumption tier, managed identity)"]
@@ -74,6 +74,7 @@ flowchart TD
     SB -->|"listen (listen-only key), embedding-jobs"| EmbedWorker
     API -->|"read/write (admin user+pass)"| PG
     WorkerGroup -->|"read/write (admin user+pass)"| PG
+    WorkerGroup -->|"checkpoint check + write per<br/>super-step (thread_id = job_id:ticker)"| PG
     EmbedWorker -->|"write — vector embedding\n(admin user+pass)"| PG
     API -->|"cache check (read) — access key"| Redis
     WorkerGroup -->|"cache write — access key"| Redis

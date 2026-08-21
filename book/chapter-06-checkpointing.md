@@ -137,3 +137,57 @@ Phase 6 is now genuinely complete: the mechanism proven against the real 5-agent
 ## Azure Components Used This Chapter
 
 Genuinely none new. Checkpointing reuses the existing `alpha-research-pg` Postgres server entirely — `AsyncPostgresSaver.setup()` just adds four new tables to the same database `alpha-worker` already writes `tickerjob`/`tokenusage`/`tickerprofile` into. No new resource, no new Container App, no new secret. The one genuinely new *tool* this chapter used wasn't a resource at all — `az containerapp revision restart`, to trigger a real platform-level container restart for the live crash test, rather than simulating one.
+
+## The Architecture So Far
+
+No new box this chapter — every node below is exactly what Chapter 5 ended with. But "no new resource" isn't the same as "nothing changed": `alpha-worker`'s relationship with Postgres is genuinely different now, and that deserves its own line on the diagram, not silence just because it reuses an existing edge's endpoints. The new edge is highlighted the same way a new *node* would be in earlier chapters — the behavior is new even though the boxes aren't.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
+
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
+    end
+
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas<br/>(1 replica per 5 queued msgs)"]
+
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ tokenusage, tickerprofile,<br/>researchreport, checkpoints (pgvector + LangGraph)")]
+    Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
+    APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — gpt-5-mini,<br/>text-embedding-3-small"]
+
+    User --> SWA
+    SWA -->|HTTPS| API
+    API -->|send job, per ticker on miss| SB
+    SB -->|deliver job, one per replica| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
+    API -->|read status| PG
+    WorkerGroup -->|write status/result/token-cost| PG
+    EmbedWorker -->|write report + vector| PG
+    API -->|"search: read + embed query"| PG
+    API -->|cache check| Redis
+    WorkerGroup -->|cache write| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
+    WorkerGroup -->|publish report text| SB
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity (AAD token)"| OpenAI
+    WorkerGroup -->|"checkpoint check (aget_tuple) +<br/>write per super-step<br/>(thread_id = job_id:ticker)"| PG
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
+    classDef replica fill:#e8f5e9,stroke:#66bb6a,stroke-width:1px,color:#2e7d32
+    class SWA,API,SB,PG,Redis,OpenAI,APIM,EmbedWorker existing
+    class WorkerGroup existing
+    class W1,W2,Wdots replica
+    linkStyle 16 stroke:#00c853,stroke-width:3px
+```
+
+That last edge — the highlighted one — is the whole chapter in one line: the same worker, the same database, but now with a real conversation happening between them that didn't exist before (*"has this thread run before?"*, then, as the graph progresses, *"here's what just finished"*) rather than only ever writing a final result once at the end.
