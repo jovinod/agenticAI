@@ -108,7 +108,7 @@ async def synthesizer_node(state: ResearchState) -> dict:
     }
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     builder = StateGraph(ResearchState)
     builder.add_node("fundamentals", fundamentals_node)
     builder.add_node("technical", technical_node)
@@ -129,11 +129,11 @@ def build_graph():
     builder.add_edge("risk", "synthesizer")
     builder.add_edge("synthesizer", END)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
-async def run_research(job_id: str, ticker: str, market: str) -> dict:
-    graph = build_graph()
+async def run_research(job_id: str, ticker: str, market: str, checkpointer=None) -> dict:
+    graph = build_graph(checkpointer)
     initial_state: ResearchState = {
         "job_id": job_id,
         "ticker": ticker,
@@ -147,7 +147,25 @@ async def run_research(job_id: str, ticker: str, market: str) -> dict:
         "final_report": "",
         "usage_log": [],
     }
-    result = await graph.ainvoke(initial_state)
+
+    if checkpointer is None:
+        # No durability requested (e.g. the standalone __main__ test below) --
+        # exact previous behavior, no thread_id/config needed at all.
+        result = await graph.ainvoke(initial_state)
+    else:
+        # thread_id is OUR chosen identity for "this ticker's run within this
+        # job" -- job_id alone isn't enough, since one job fans out into
+        # independent per-ticker graph runs (same reasoning as short-term
+        # memory's Redis keys). checkpointer.aget_tuple() is the cheap check
+        # that tells us whether this is a fresh run or a crash survivor:
+        # None -> nothing checkpointed yet, pass real initial state; a real
+        # tuple -> a checkpoint already exists, pass None so LangGraph resumes
+        # from the last completed super-step instead of redoing everything.
+        thread_id = f"{job_id}:{ticker}"
+        config = {"configurable": {"thread_id": thread_id}}
+        existing = await checkpointer.aget_tuple(config)
+        resume_input = None if existing else initial_state
+        result = await graph.ainvoke(resume_input, config)
 
     total_usage = _empty_usage()
     for usage in result["usage_log"]:

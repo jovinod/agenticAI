@@ -8,6 +8,7 @@ dependencies = [
     "azure-servicebus>=7.14.3",
     "httpx>=0.28.1",
     "langgraph>=1.2.11",
+    "langgraph-checkpoint-postgres>=3.1.2",
     "mcp>=2.0.0",
     "psycopg[binary]>=3.3.4",
     "python-dotenv>=1.2.2",

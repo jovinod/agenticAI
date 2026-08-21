@@ -10,7 +10,7 @@ was built (concept explanations now live there, not in a separate glossary file)
 
 ## Status
 
-**Phase 1 — Frontend shell: complete.** **Phase 2 — Backend skeleton: complete.** **Phase 3 — MCP tools + real data: complete.** **Phase 4 — First agent (Azure AI Foundry + tool-calling + token/cost logging): complete.** A real Azure OpenAI-backed agent (`gpt-5-mini`) decides which tools to call — real stock data, real MCP-backed web search, and one genuine LLM-discoverable Skill (`assess_news_sentiment`) it can choose to apply — runs alongside the existing deterministic checks (not a replacement, deliberately), with every call's token usage and estimated cost logged to Postgres. Deployed and verified live. Next: Phase 5 — multi-agent + Skills + real three-tier memory.
+**Phase 1 — Frontend shell: complete.** **Phase 2 — Backend skeleton: complete.** **Phase 3 — MCP tools + real data: complete.** **Phase 4 — First agent (Azure AI Foundry + tool-calling + token/cost logging): complete.** **Phase 5 — Multi-agent + Skills + real three-tier memory: complete.** Five-agent LangGraph pipeline (Fundamentals/Technical/News/Risk/Synthesizer), genuinely concurrent execution, Azure API Management fronting Foundry, real KEDA autoscaling, Skills genuinely discoverable, and all three memory tiers (short-term/Redis, profile/Postgres, semantic/pgvector via a standalone `/search` feature) — all deployed and verified live. **Phase 6 — Checkpointing & durable workflows: complete.** LangGraph's built-in Postgres checkpointing wired into the research graph, verified against a genuine `az containerapp revision restart` mid-job on the live deployment, not a simulated crash. Next: Phase 7 — Resilience.
 
 ## Architecture
 

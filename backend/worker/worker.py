@@ -7,6 +7,7 @@ from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from models import TickerJob, TokenUsage, TickerProfile
 from agents.graph import run_research
 from llm.model_client import AZURE_OPENAI_DEPLOYMENT
@@ -19,6 +20,12 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
 )
 engine = create_engine(DATABASE_URL)
+
+# AsyncPostgresSaver wants a plain libpq conninfo string ("postgresql://...") --
+# confirmed directly, it rejects SQLAlchemy's "+psycopg" dialect prefix outright
+# (ProgrammingError: missing "=" after ...). Same database, just a different
+# driver expecting a different string shape.
+CHECKPOINT_DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
 
 SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
@@ -74,7 +81,7 @@ def _upsert_ticker_profile(session, ticker: str, market: str, sector, industry):
     session.commit()
 
 
-async def process_ticker(job_id: str, ticker: str, market: str, embed_sender):
+async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, checkpointer):
     with Session(engine) as session:
         task = session.exec(
             select(TickerJob).where(TickerJob.job_id == job_id, TickerJob.ticker == ticker)
@@ -88,7 +95,7 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender):
     # Risk (deterministic flag_risk_factors + cross-signal judgment) waits for
     # all three, Synthesizer runs last. No separate direct calls here anymore --
     # the graph's own Fundamentals/Risk agents already do that internally.
-    graph_result = await run_research(job_id, ticker, market)
+    graph_result = await run_research(job_id, ticker, market, checkpointer)
     data = graph_result.get("fundamentals_data", {})
 
     if not data or "error" in data:
@@ -149,7 +156,13 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender):
 async def main():
     client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
     embed_client = ServiceBusClient.from_connection_string(SERVICEBUS_EMBED_CONNECTION_STRING)
-    async with client, embed_client:
+    async with client, embed_client, AsyncPostgresSaver.from_conn_string(CHECKPOINT_DATABASE_URL) as checkpointer:
+        # Idempotent -- confirmed safe to call on every startup, no separate
+        # migration tracking needed. Creates its own 4 tables the first time
+        # (checkpoints, checkpoint_blobs, checkpoint_writes, checkpoint_migrations);
+        # no-ops after that.
+        await checkpointer.setup()
+
         async with (
             client.get_queue_receiver(queue_name=SERVICEBUS_QUEUE_NAME) as receiver,
             embed_client.get_queue_sender(queue_name=SERVICEBUS_EMBED_QUEUE_NAME) as embed_sender,
@@ -157,7 +170,7 @@ async def main():
             print("Worker started, waiting for messages...")
             async for msg in receiver:
                 data = json.loads(str(msg))
-                await process_ticker(data["job_id"], data["ticker"], data["market"], embed_sender)
+                await process_ticker(data["job_id"], data["ticker"], data["market"], embed_sender, checkpointer)
                 await receiver.complete_message(msg)  # acknowledge — without this, Service Bus redelivers it
 
 
