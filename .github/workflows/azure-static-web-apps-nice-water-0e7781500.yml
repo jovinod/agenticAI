@@ -24,6 +24,11 @@ jobs:
         uses: Azure/static-web-apps-deploy@v1
         env:
           VITE_API_URL: https://alpha-api.orangesky-1a62d756.centralindia.azurecontainerapps.io
+          # None of these are secrets -- see book/chapter-08 for why a Client ID
+          # and API scope are safe to have in plain, visible frontend code.
+          VITE_ENTRA_CLIENT_ID: 6df6979f-672a-405a-a8ea-5d9e73369bf1
+          VITE_ENTRA_TENANT_ID: cbfea054-fab5-4c73-b127-f814f3d0e6df
+          VITE_ENTRA_API_SCOPE: api://6df6979f-672a-405a-a8ea-5d9e73369bf1/access_as_user
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_NICE_WATER_0E7781500 }}
           repo_token: ${{ secrets.GITHUB_TOKEN }} # Used for Github integrations (i.e. PR comments)

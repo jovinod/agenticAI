@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal
 import json
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from azure.servicebus.aio import ServiceBusClient
@@ -13,6 +13,7 @@ import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from models import TickerJob, ResearchReport
 from llm.embeddings_client import embed
+from auth import require_user
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
@@ -73,7 +74,7 @@ def read_root():
     return {"status": "ok"}
 
 
-@app.post("/research")
+@app.post("/research", dependencies=[Depends(require_user)])
 async def create_research(request: ResearchRequest):
     job_id = str(uuid.uuid4())
     today = date.today().isoformat()
@@ -112,7 +113,7 @@ async def _read_progress(job_id: str, ticker: str) -> dict:
     return progress
 
 
-@app.get("/research/{job_id}")
+@app.get("/research/{job_id}", dependencies=[Depends(require_user)])
 async def get_research(job_id: str):
     with Session(engine) as session:
         tasks = session.exec(select(TickerJob).where(TickerJob.job_id == job_id)).all()
@@ -139,7 +140,7 @@ async def get_research(job_id: str):
     return {"status": "done", "result": {"tickers": tickers, "summary": summary}}
 
 
-@app.get("/search")
+@app.get("/search", dependencies=[Depends(require_user)])
 async def search_reports(q: str, limit: int = 5):
     """Semantic memory's read side -- a human's free-form question, matched
     against past synthesized reports by meaning, not by ticker/date key.

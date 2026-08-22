@@ -86,6 +86,19 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, ch
         task = session.exec(
             select(TickerJob).where(TickerJob.job_id == job_id, TickerJob.ticker == ticker)
         ).first()
+        if task is None:
+            # Phase 7 -- a message referencing a (job_id, ticker) that doesn't
+            # exist in THIS worker's own database must not crash the whole
+            # process. Real, not hypothetical: hit this directly when a
+            # locally-run API instance (pointed at a different database than
+            # the real deployed worker) published a real message to the real
+            # queue for a job_id the worker could never find -- crashed the
+            # live worker with an uncaught AttributeError before this fix,
+            # and Service Bus would have kept redelivering and re-crashing it.
+            # Nothing to mark "failed" either, since there's no real row --
+            # just log and move on.
+            print(f"No TickerJob row found for job {job_id}, ticker {ticker} -- skipping.")
+            return
         task.status = "running"
         session.add(task)
         session.commit()

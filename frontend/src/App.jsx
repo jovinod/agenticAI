@@ -1,15 +1,48 @@
 import { useState } from 'react'
+import { useMsal, AuthenticatedTemplate, UnauthenticatedTemplate } from '@azure/msal-react'
+import { InteractionRequiredAuthError } from '@azure/msal-browser'
+import { loginRequest } from './authConfig.js'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-function App() {
+function SignInScreen() {
+  const { instance } = useMsal()
+  return (
+    <div id="center">
+      <h1>Alpha - Stock Research</h1>
+      <p>Please sign in to continue.</p>
+      <button onClick={() => instance.loginRedirect(loginRequest)}>Sign in with Microsoft</button>
+    </div>
+  )
+}
+
+function ResearchApp() {
+  const { instance, accounts } = useMsal()
   const [tickerInput, setTickerInput] = useState('')
   const [market, setMarket] = useState('US')
   const [tickers, setTickers] = useState([])
   const [error, setError] = useState('')
   const [status, setStatus] = useState('idle') // 'idle' | 'loading' | 'done'
   const [report, setReport] = useState(null)
+
+  // acquireTokenSilent uses MSAL's own cache and only makes a real network
+  // call when the cached token is actually close to expiring -- calling this
+  // before every request (rather than threading a token through state) is
+  // the normal MSAL pattern, not wasteful the way it might look at first.
+  async function getAccessToken() {
+    const request = { ...loginRequest, account: accounts[0] }
+    try {
+      const result = await instance.acquireTokenSilent(request)
+      return result.accessToken
+    } catch (err) {
+      if (err instanceof InteractionRequiredAuthError) {
+        const result = await instance.acquireTokenPopup(request)
+        return result.accessToken
+      }
+      throw err
+    }
+  }
 
   async function handleSubmit() {
     const parsed = tickerInput
@@ -33,9 +66,13 @@ function App() {
     setStatus('loading')
 
     try {
+      const token = await getAccessToken()
       const response = await fetch(`${API_URL}/research`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({ tickers: parsed, market }),
       })
       if (!response.ok) {
@@ -61,7 +98,10 @@ function App() {
       attempts += 1
 
       try {
-        const response = await fetch(`${API_URL}/research/${jobId}`)
+        const token = await getAccessToken()
+        const response = await fetch(`${API_URL}/research/${jobId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
         if (!response.ok) {
           throw new Error(`Server returned ${response.status}`)
         }
@@ -134,6 +174,19 @@ function App() {
         </div>
       )}
     </div>
+  )
+}
+
+function App() {
+  return (
+    <>
+      <AuthenticatedTemplate>
+        <ResearchApp />
+      </AuthenticatedTemplate>
+      <UnauthenticatedTemplate>
+        <SignInScreen />
+      </UnauthenticatedTemplate>
+    </>
   )
 }
 

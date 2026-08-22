@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "azure-servicebus>=7.14.3",
     "fastapi>=0.141.1",
+    "fastapi-azure-auth>=5.3.0",
     "httpx>=0.28.1",
     "pgvector>=0.4.1",
     "psycopg[binary]>=3.3.4",
