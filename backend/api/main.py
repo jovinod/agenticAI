@@ -120,10 +120,13 @@ async def get_research(job_id: str):
     if not tasks:
         return {"error": "not found"}
 
-    if any(t.status != "done" for t in tasks):
+    # "failed" is a real terminal state now too (Phase 7) -- a ticker that
+    # failed permanently shouldn't leave the whole job stuck reporting "running"
+    # forever just because it never reached "done".
+    if any(t.status not in ("done", "failed") for t in tasks):
         progress = {}
         for t in tasks:
-            if t.status != "done":
+            if t.status not in ("done", "failed"):
                 progress[t.ticker] = await _read_progress(job_id, t.ticker)
         return {"status": "running", "progress": progress}
 

@@ -95,22 +95,59 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, ch
     # Risk (deterministic flag_risk_factors + cross-signal judgment) waits for
     # all three, Synthesizer runs last. No separate direct calls here anymore --
     # the graph's own Fundamentals/Risk agents already do that internally.
-    graph_result = await run_research(job_id, ticker, market, checkpointer)
-    data = graph_result.get("fundamentals_data", {})
+    try:
+        graph_result = await run_research(job_id, ticker, market, checkpointer)
+    except Exception as exc:
+        # Phase 7 (Resilience) -- a persistent, retry-exhausted failure must not
+        # crash the whole worker process. Before this fix, an uncaught exception
+        # here propagated straight out of main()'s message loop, killing every
+        # OTHER job this worker replica happened to be handling too -- and since
+        # complete_message() never ran, Service Bus would redeliver the same
+        # message and crash the worker again, up to maxDeliveryCount (10) times,
+        # before finally dead-lettering it. One bad ticker could take the whole
+        # worker down repeatedly. This ticker now fails cleanly instead.
+        print(f"{ticker} failed permanently: {exc}")
+        error_summary = f"{ticker}: research failed - {exc}"
+        with Session(engine) as session:
+            task = session.exec(
+                select(TickerJob).where(TickerJob.job_id == job_id, TickerJob.ticker == ticker)
+            ).first()
+            task.status = "failed"
+            task.result = json.dumps({"tickers": [ticker], "summary": [error_summary]})
+            session.add(task)
+            session.commit()
+        return
 
+    data = graph_result.get("fundamentals_data", {})
+    final_report = graph_result.get("final_report", "")
+
+    # Phase 7 -- this used to gate final_report/TokenUsage/semantic-memory on
+    # fundamentals specifically succeeding, written before graceful
+    # degradation existed. Real, unplanned proof it was wrong: a live test
+    # with fundamentals failing returned just "fundamentals data unavailable"
+    # even when other agents' real work existed right there in graph_result,
+    # silently discarded. The deterministic price line still needs real
+    # fundamentals data -- nothing else here should depend on it.
     if not data or "error" in data:
-        summary_line = data.get("error", f"{ticker}: fundamentals data unavailable")
+        price_line = data.get("error", f"{ticker}: fundamentals data unavailable")
     else:
-        summary_line = (
+        price_line = (
             f"{ticker}: {data['currency']} {data['price']}, "
             f"P/E {data['pe_ratio']}, 52w range {data['fifty_two_week_low']}-{data['fifty_two_week_high']}"
         )
         flags = graph_result.get("risk_flags", [])
         if flags:
-            summary_line += " | Risk flags: " + "; ".join(flags)
-        summary_line += " | Report: " + graph_result.get("final_report", "")
+            price_line += " | Risk flags: " + "; ".join(flags)
 
-        usage = graph_result["total_usage"]
+    summary_line = price_line
+    if final_report:
+        summary_line += " | Report: " + final_report
+
+    # Real cost can be incurred by Technical/News/Risk/Synthesizer even when
+    # Fundamentals itself failed -- log whatever total_usage actually is,
+    # not just when fundamentals specifically succeeded.
+    usage = graph_result.get("total_usage") or {}
+    if usage.get("total_tokens", 0) > 0:
         with Session(engine) as session:
             session.add(TokenUsage(
                 job_id=job_id,
@@ -123,18 +160,23 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, ch
             ))
             session.commit()
 
+    # Profile memory specifically needs real fundamentals-sourced sector/
+    # industry -- this one genuinely stays conditional on fundamentals having
+    # actually succeeded, unlike everything above.
+    if data and "error" not in data:
         with Session(engine) as session:
             _upsert_ticker_profile(session, ticker, market, data.get("sector"), data.get("industry"))
 
-        # Semantic memory: publish, don't embed inline -- embed-worker owns the
-        # actual Foundry call and the ResearchReport write, so a slow or failing
-        # embeddings call never adds latency to this job's own completion.
-        report_text = graph_result.get("final_report", "")
-        if report_text:
-            embed_message = json.dumps({
-                "job_id": job_id, "ticker": ticker, "market": market, "report_text": report_text,
-            })
-            await embed_sender.send_messages(ServiceBusMessage(embed_message))
+    # Semantic memory: publish, don't embed inline -- embed-worker owns the
+    # actual Foundry call and the ResearchReport write, so a slow or failing
+    # embeddings call never adds latency to this job's own completion.
+    # Whatever real report text exists is worth embedding, regardless of
+    # whether fundamentals specifically succeeded.
+    if final_report:
+        embed_message = json.dumps({
+            "job_id": job_id, "ticker": ticker, "market": market, "report_text": final_report,
+        })
+        await embed_sender.send_messages(ServiceBusMessage(embed_message))
     print(f"{ticker} done.")
 
     result = {"tickers": [ticker], "summary": [summary_line]}

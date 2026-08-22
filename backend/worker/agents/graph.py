@@ -16,6 +16,7 @@ show, not just silence until the whole graph completes.
 import operator
 from typing import Annotated, TypedDict
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import RetryPolicy
 from agents import fundamentals_agent, technical_agent, news_agent, risk_agent, synthesizer_agent
 from memory.short_term import write_progress
 
@@ -45,8 +46,41 @@ def _empty_usage() -> dict:
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_cost_usd": 0.0}
 
 
+async def _degraded_result(job_id: str, ticker: str, node_name: str, state_key: str, exc: Exception, extra: dict | None = None) -> dict:
+    """Phase 7 (Resilience) -- a persistent failure (RetryPolicy's retries
+    exhausted, or a non-retryable exception type entirely) degrades only
+    THIS node's own state field instead of raising, so downstream nodes
+    (Risk, Synthesizer) still run on whatever data IS real, and successful
+    parallel siblings' usage_log entries survive intact.
+
+    Deliberately a plain try/except INSIDE each node, not LangGraph's
+    error_handler=. Verified directly, not assumed: error_handler does get
+    called and does produce a fallback value, but the graph still re-raises
+    the original exception anyway when the failing node is part of a
+    concurrent parallel fan-out (Fundamentals/Technical/News, exactly this
+    project's main failure surface) -- traced to LangGraph's async executor
+    independently re-raising a submitted task's exception on exit, a
+    separate code path from the one that's supposed to honor "this was
+    handled." A solo/sequential node doesn't hit this, but relying on a
+    mechanism that's inconsistent for our most important case isn't worth
+    it when a plain try/except works identically everywhere. See
+    book/chapter-07.
+    """
+    message = f"{node_name} unavailable: {exc}"
+    await write_progress(job_id, ticker, node_name, message)
+    result = {state_key: message, "usage_log": []}
+    if extra:
+        result.update(extra)
+    return result
+
+
 async def fundamentals_node(state: ResearchState) -> dict:
-    result = await fundamentals_agent.run(state["ticker"], state["market"])
+    try:
+        result = await fundamentals_agent.run(state["ticker"], state["market"])
+    except Exception as exc:
+        return await _degraded_result(
+            state["job_id"], state["ticker"], "fundamentals", "fundamentals_summary", exc, {"fundamentals_data": {}}
+        )
     summary = result.get("answer") or result.get("error", "Fundamentals data unavailable.")
     await write_progress(state["job_id"], state["ticker"], "fundamentals", summary)
     return {
@@ -57,7 +91,10 @@ async def fundamentals_node(state: ResearchState) -> dict:
 
 
 async def technical_node(state: ResearchState) -> dict:
-    result = await technical_agent.run(state["ticker"], state["market"])
+    try:
+        result = await technical_agent.run(state["ticker"], state["market"])
+    except Exception as exc:
+        return await _degraded_result(state["job_id"], state["ticker"], "technical", "technical_summary", exc)
     summary = result.get("answer") or result.get("error", "Technical data unavailable.")
     await write_progress(state["job_id"], state["ticker"], "technical", summary)
     return {
@@ -67,7 +104,10 @@ async def technical_node(state: ResearchState) -> dict:
 
 
 async def news_node(state: ResearchState) -> dict:
-    result = await news_agent.run(state["ticker"], state["market"])
+    try:
+        result = await news_agent.run(state["ticker"], state["market"])
+    except Exception as exc:
+        return await _degraded_result(state["job_id"], state["ticker"], "news", "news_summary", exc)
     summary = result.get("answer", "News assessment unavailable.")
     await write_progress(state["job_id"], state["ticker"], "news", summary)
     return {
@@ -77,12 +117,17 @@ async def news_node(state: ResearchState) -> dict:
 
 
 async def risk_node(state: ResearchState) -> dict:
-    result = await risk_agent.run(
-        state.get("fundamentals_data", {}),
-        state.get("fundamentals_summary", ""),
-        state.get("technical_summary", ""),
-        state.get("news_summary", ""),
-    )
+    try:
+        result = await risk_agent.run(
+            state.get("fundamentals_data", {}),
+            state.get("fundamentals_summary", ""),
+            state.get("technical_summary", ""),
+            state.get("news_summary", ""),
+        )
+    except Exception as exc:
+        return await _degraded_result(
+            state["job_id"], state["ticker"], "risk", "risk_summary", exc, {"risk_flags": []}
+        )
     summary = result.get("answer", "Risk assessment unavailable.")
     await write_progress(state["job_id"], state["ticker"], "risk", summary)
     return {
@@ -93,13 +138,16 @@ async def risk_node(state: ResearchState) -> dict:
 
 
 async def synthesizer_node(state: ResearchState) -> dict:
-    result = await synthesizer_agent.run(
-        state["ticker"],
-        state.get("fundamentals_summary", ""),
-        state.get("technical_summary", ""),
-        state.get("news_summary", ""),
-        state.get("risk_summary", ""),
-    )
+    try:
+        result = await synthesizer_agent.run(
+            state["ticker"],
+            state.get("fundamentals_summary", ""),
+            state.get("technical_summary", ""),
+            state.get("news_summary", ""),
+            state.get("risk_summary", ""),
+        )
+    except Exception as exc:
+        return await _degraded_result(state["job_id"], state["ticker"], "synthesizer", "final_report", exc)
     summary = result.get("answer", "Report unavailable.")
     await write_progress(state["job_id"], state["ticker"], "synthesizer", summary)
     return {
@@ -110,11 +158,22 @@ async def synthesizer_node(state: ResearchState) -> dict:
 
 def build_graph(checkpointer=None):
     builder = StateGraph(ResearchState)
-    builder.add_node("fundamentals", fundamentals_node)
-    builder.add_node("technical", technical_node)
-    builder.add_node("news", news_node)
-    builder.add_node("risk", risk_node)
-    builder.add_node("synthesizer", synthesizer_node)
+    # Phase 7 (Resilience) -- proven first on just "news", the exact node a
+    # real httpx.ReadError hit during Phase 6 testing (see book/chapter-06):
+    # a simulated version of that same error was retried automatically, the
+    # super-step never failed, and Fundamentals/Technical (its parallel
+    # siblings) were completely unaffected. Every node here calls the model
+    # client and is exposed to the same class of transient failure, so the
+    # same default RetryPolicy() (3 attempts, exponential backoff + jitter)
+    # now applies uniformly, not just to the one node that happened to fail.
+    # Persistent-failure degradation now lives INSIDE each node itself (see
+    # _degraded_result above) -- not via error_handler=, for the reason
+    # documented there.
+    builder.add_node("fundamentals", fundamentals_node, retry_policy=RetryPolicy())
+    builder.add_node("technical", technical_node, retry_policy=RetryPolicy())
+    builder.add_node("news", news_node, retry_policy=RetryPolicy())
+    builder.add_node("risk", risk_node, retry_policy=RetryPolicy())
+    builder.add_node("synthesizer", synthesizer_node, retry_policy=RetryPolicy())
 
     # Fan-out: all three fire from START in parallel, none waits on the others.
     builder.add_edge(START, "fundamentals")
