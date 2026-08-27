@@ -10,16 +10,41 @@ from pydantic import BaseModel
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
 from azure.identity.aio import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
+import psycopg
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from models import TickerJob, ResearchReport
 from llm.embeddings_client import embed
 from auth import require_user
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
-)
-engine = create_engine(DATABASE_URL)
+# Phase 8, Stage B -- Managed Identity instead of a password secret, when
+# running in Azure. DATABASE_HOST is only ever set there: the local Docker
+# Postgres container has no AAD support at all, so (unlike Service Bus's
+# DefaultAzureCredential, which works unchanged locally via `az login`) this
+# genuinely needs two different code paths, not one that happens to work
+# both places.
+DATABASE_HOST = os.environ.get("DATABASE_HOST")
+DATABASE_NAME = os.environ.get("DATABASE_NAME", "alpha")
+DATABASE_USER = os.environ.get("DATABASE_USER")  # must match the Managed Identity's Entra ID display name
+PG_TOKEN_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
+
+if DATABASE_HOST:
+    _pg_credential = SyncDefaultAzureCredential()
+
+    def _get_pg_connection():
+        token = _pg_credential.get_token(PG_TOKEN_SCOPE).token
+        return psycopg.connect(
+            host=DATABASE_HOST, port=5432, dbname=DATABASE_NAME,
+            user=DATABASE_USER, password=token, sslmode="require",
+        )
+
+    engine = create_engine("postgresql+psycopg://", creator=_get_pg_connection)
+else:
+    DATABASE_URL = os.environ.get(
+        "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
+    )
+    engine = create_engine(DATABASE_URL)
 
 # Phase 8, Stage B -- Managed Identity instead of a SAS connection string.
 # DefaultAzureCredential tries several methods in order; in Azure it uses this

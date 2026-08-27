@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
 from azure.identity.aio import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
+import psycopg
+from psycopg.conninfo import make_conninfo
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -17,16 +20,49 @@ from llm.model_client import AZURE_OPENAI_DEPLOYMENT
 # Doesn't override an already-set env var, so an explicit shell export still wins if used.
 load_dotenv(".env.local")
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
-)
-engine = create_engine(DATABASE_URL)
+# Phase 8, Stage B -- Managed Identity instead of a password secret, when
+# running in Azure. Same reasoning as backend/api/main.py: the local Docker
+# Postgres container has no AAD support at all, so this is a genuine second
+# code path, not a same-code-either-way fallback like Service Bus's.
+DATABASE_HOST = os.environ.get("DATABASE_HOST")
+DATABASE_NAME = os.environ.get("DATABASE_NAME", "alpha")
+DATABASE_USER = os.environ.get("DATABASE_USER")  # must match the Managed Identity's Entra ID display name
+PG_TOKEN_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 
-# AsyncPostgresSaver wants a plain libpq conninfo string ("postgresql://...") --
-# confirmed directly, it rejects SQLAlchemy's "+psycopg" dialect prefix outright
-# (ProgrammingError: missing "=" after ...). Same database, just a different
-# driver expecting a different string shape.
-CHECKPOINT_DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
+if DATABASE_HOST:
+    _pg_credential = SyncDefaultAzureCredential()
+
+    def _get_pg_connection():
+        token = _pg_credential.get_token(PG_TOKEN_SCOPE).token
+        return psycopg.connect(
+            host=DATABASE_HOST, port=5432, dbname=DATABASE_NAME,
+            user=DATABASE_USER, password=token, sslmode="require",
+        )
+
+    engine = create_engine("postgresql+psycopg://", creator=_get_pg_connection)
+
+    # AsyncPostgresSaver opens exactly one physical connection and holds it for
+    # the worker's entire lifetime (confirmed by reading its source -- it's a
+    # single AsyncConnection, not a pool), so a token fetched once here at
+    # startup is enough: Postgres never re-checks the password after the
+    # initial handshake, unlike the SQLAlchemy pool above which opens new
+    # physical connections over time and needs a fresh token each time.
+    CHECKPOINT_DATABASE_URL = make_conninfo(
+        host=DATABASE_HOST, port=5432, dbname=DATABASE_NAME,
+        user=DATABASE_USER, password=_pg_credential.get_token(PG_TOKEN_SCOPE).token,
+        sslmode="require",
+    )
+else:
+    DATABASE_URL = os.environ.get(
+        "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
+    )
+    engine = create_engine(DATABASE_URL)
+
+    # AsyncPostgresSaver wants a plain libpq conninfo string ("postgresql://...") --
+    # confirmed directly, it rejects SQLAlchemy's "+psycopg" dialect prefix outright
+    # (ProgrammingError: missing "=" after ...). Same database, just a different
+    # driver expecting a different string shape.
+    CHECKPOINT_DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
 
 # Phase 8, Stage B -- Managed Identity instead of separate SAS connection
 # strings per queue/direction. Both RBAC role assignments (Receiver on
