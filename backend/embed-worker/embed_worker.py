@@ -3,6 +3,7 @@ import json
 import os
 from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
+from azure.identity.aio import DefaultAzureCredential
 from sqlmodel import create_engine, Session
 from models import ResearchReport
 from embeddings_client import embed
@@ -15,7 +16,9 @@ DATABASE_URL = os.environ.get(
 )
 engine = create_engine(DATABASE_URL)
 
-SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
+# Phase 8, Stage B -- Managed Identity (granted "Azure Service Bus Data
+# Receiver" on embedding-jobs specifically) instead of a SAS connection string.
+SERVICEBUS_FQDN = os.environ.get("SERVICEBUS_FQDN", "alpharesearchsb.servicebus.windows.net")
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_EMBEDDING_QUEUE_NAME", "embedding-jobs")
 
 
@@ -33,13 +36,25 @@ async def process_message(job_id: str, ticker: str, market: str, report_text: st
 
 
 async def main():
-    client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
-    async with client:
+    credential = DefaultAzureCredential()
+    client = ServiceBusClient(fully_qualified_namespace=SERVICEBUS_FQDN, credential=credential)
+    async with client, credential:
         async with client.get_queue_receiver(queue_name=SERVICEBUS_QUEUE_NAME) as receiver:
             print("Embed worker started, waiting for messages...")
             async for msg in receiver:
-                data = json.loads(str(msg))
-                await process_message(data["job_id"], data["ticker"], data["market"], data["report_text"])
+                try:
+                    data = json.loads(str(msg))
+                    job_id, ticker, market, report_text = (
+                        data["job_id"], data["ticker"], data["market"], data["report_text"]
+                    )
+                except Exception as exc:
+                    # Same fix as worker.py's main() -- a malformed message
+                    # must not crash-loop this process forever.
+                    print(f"Malformed message, dropping: {exc}")
+                    await receiver.complete_message(msg)
+                    continue
+
+                await process_message(job_id, ticker, market, report_text)
                 await receiver.complete_message(msg)
 
 

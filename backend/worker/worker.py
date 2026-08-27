@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
+from azure.identity.aio import DefaultAzureCredential
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -27,15 +28,14 @@ engine = create_engine(DATABASE_URL)
 # driver expecting a different string shape.
 CHECKPOINT_DATABASE_URL = DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
 
-SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
+# Phase 8, Stage B -- Managed Identity instead of separate SAS connection
+# strings per queue/direction. Both RBAC role assignments (Receiver on
+# research-jobs, Sender on embedding-jobs) live on this SAME identity, so one
+# credential covers both clients below -- the precision that used to come
+# from separate SAS keys now comes from the separately-scoped role
+# assignments instead.
+SERVICEBUS_FQDN = os.environ.get("SERVICEBUS_FQDN", "alpharesearchsb.servicebus.windows.net")
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
-
-# Semantic memory's write side lives in a separate deployable (embed-worker),
-# not here -- this worker only publishes a message and moves on, so a slow or
-# failing embeddings call never blocks the actual research pipeline. Own
-# queue, own SAS scope (send-only), same reasoning as research-jobs' own
-# separate send-only/listen-only rules.
-SERVICEBUS_EMBED_CONNECTION_STRING = os.environ.get("SERVICEBUS_EMBED_CONNECTION_STRING")
 SERVICEBUS_EMBED_QUEUE_NAME = os.environ.get("SERVICEBUS_EMBED_QUEUE_NAME", "embedding-jobs")
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
@@ -209,9 +209,10 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, ch
 
 
 async def main():
-    client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
-    embed_client = ServiceBusClient.from_connection_string(SERVICEBUS_EMBED_CONNECTION_STRING)
-    async with client, embed_client, AsyncPostgresSaver.from_conn_string(CHECKPOINT_DATABASE_URL) as checkpointer:
+    credential = DefaultAzureCredential()
+    client = ServiceBusClient(fully_qualified_namespace=SERVICEBUS_FQDN, credential=credential)
+    embed_client = ServiceBusClient(fully_qualified_namespace=SERVICEBUS_FQDN, credential=credential)
+    async with client, embed_client, credential, AsyncPostgresSaver.from_conn_string(CHECKPOINT_DATABASE_URL) as checkpointer:
         # Idempotent -- confirmed safe to call on every startup, no separate
         # migration tracking needed. Creates its own 4 tables the first time
         # (checkpoints, checkpoint_blobs, checkpoint_writes, checkpoint_migrations);
@@ -224,8 +225,23 @@ async def main():
         ):
             print("Worker started, waiting for messages...")
             async for msg in receiver:
-                data = json.loads(str(msg))
-                await process_ticker(data["job_id"], data["ticker"], data["market"], embed_sender, checkpointer)
+                try:
+                    data = json.loads(str(msg))
+                    job_id, ticker, market = data["job_id"], data["ticker"], data["market"]
+                except Exception as exc:
+                    # A message that isn't valid JSON, or is missing an
+                    # expected field, isn't a job we can ever process --
+                    # redelivering it just crashes this loop again forever
+                    # (hit this for real: a stray plain-text test message
+                    # took the whole worker down in a crash-restart loop,
+                    # since nothing here caught it before this fix). Drop it
+                    # and move on instead of taking down every OTHER job
+                    # this worker replica happens to be handling too.
+                    print(f"Malformed message, dropping: {exc}")
+                    await receiver.complete_message(msg)
+                    continue
+
+                await process_ticker(job_id, ticker, market, embed_sender, checkpointer)
                 await receiver.complete_message(msg)  # acknowledge — without this, Service Bus redelivers it
 
 

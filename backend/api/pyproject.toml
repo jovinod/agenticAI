@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "aiohttp>=3.14.3",
+    "azure-identity>=1.25.3",
     "azure-servicebus>=7.14.3",
     "fastapi>=0.141.1",
     "fastapi-azure-auth>=5.3.0",

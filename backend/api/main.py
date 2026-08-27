@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
+from azure.identity.aio import DefaultAzureCredential
 import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from models import TickerJob, ResearchReport
@@ -20,7 +21,13 @@ DATABASE_URL = os.environ.get(
 )
 engine = create_engine(DATABASE_URL)
 
-SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
+# Phase 8, Stage B -- Managed Identity instead of a SAS connection string.
+# DefaultAzureCredential tries several methods in order; in Azure it uses this
+# Container App's own system-assigned identity (granted "Azure Service Bus
+# Data Sender" on research-jobs specifically, not the whole namespace), and
+# locally it falls back to `az login`'s cached credentials -- same code path
+# either way, no separate local-dev branch needed.
+SERVICEBUS_FQDN = os.environ.get("SERVICEBUS_FQDN", "alpharesearchsb.servicebus.windows.net")
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost:5173")
 
@@ -32,8 +39,10 @@ REDIS_SSL = os.environ.get("REDIS_SSL", "false").lower() == "true"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.servicebus_client = ServiceBusClient.from_connection_string(
-        SERVICEBUS_CONNECTION_STRING
+    app.state.servicebus_credential = DefaultAzureCredential()
+    app.state.servicebus_client = ServiceBusClient(
+        fully_qualified_namespace=SERVICEBUS_FQDN,
+        credential=app.state.servicebus_credential,
     )
     # One sender, opened once and reused for the app's whole lifetime — opening/closing
     # a new AMQP link per message added real overhead and inconsistent delivery latency.
@@ -51,6 +60,7 @@ async def lifespan(app: FastAPI):
     yield
     await app.state.servicebus_sender.__aexit__(None, None, None)
     await app.state.servicebus_client.close()
+    await app.state.servicebus_credential.close()
     await app.state.redis.aclose()
 
 
