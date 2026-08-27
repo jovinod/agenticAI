@@ -173,6 +173,52 @@ Every prior stage in this chapter built one piece of authentication. Stage E's j
 | `alpha-worker` | Tavily | Key Vault secret, Managed-Identity-gated (Stage D) |
 | KEDA (autoscaling) | Service Bus | Managed Identity (found and fixed while writing this section — see below) |
 
+That table in diagram form — deliberately showing *only* identity relationships (who authenticates as whom, who issues and validates tokens, where the one remaining static secret sits), not the message/data flow already diagrammed elsewhere in this project:
+
+```mermaid
+flowchart TD
+    User(["User's Microsoft account"])
+    Entra{{"Microsoft Entra ID\n(single tenant)"}}
+    Allow[["ALLOWED_USERS allow-list\n(authorization — separate from Entra ID)"]]
+    API["alpha-api"]
+
+    User -->|"1. sign in — MSAL"| Entra
+    Entra -->|"2. JWT access token"| User
+    User -->|"3. Bearer JWT"| API
+    API -->|"4. validate token"| Entra
+    API -->|"5. check signed-in email"| Allow
+
+    APIId(("alpha-api's\nManaged Identity"))
+    WorkerId(("alpha-worker's\nManaged Identity"))
+    EmbedId(("alpha-embed-worker's\nManaged Identity"))
+    APIMId(("APIM's own\nManaged Identity"))
+
+    API -.->|has| APIId
+    Worker["alpha-worker"] -.->|has| WorkerId
+    EmbedWorker["alpha-embed-worker"] -.->|has| EmbedId
+    APIM["API Management"] -.->|has| APIMId
+
+    APIId & WorkerId & EmbedId & APIMId -->|"AAD token request"| Entra
+
+    SB[("Service Bus")]
+    PG[("Postgres")]
+    Redis[("Redis")]
+    KV[("Key Vault")]
+    OpenAI[("Azure OpenAI")]
+
+    APIId -->|token| SB & PG & Redis
+    WorkerId -->|token| SB & PG & Redis & KV
+    EmbedId -->|token| SB & PG
+    APIMId -->|token| OpenAI
+
+    KV -->|"releases Tavily secret\n(only to this one identity)"| Worker
+
+    KEDA["KEDA autoscaler"] -.->|"polls queue depth as"| WorkerId
+    KEDA -.->|"polls queue depth as"| EmbedId
+
+    API & Worker & EmbedWorker -->|"Ocp-Apim-Subscription-Key\n(the one static secret left — not identity)"| APIM
+```
+
 **Two things this table deliberately does not gloss over:**
 
 1. **The boundary is identity-based, not network-based.** Every resource in this system — Postgres, Redis, Service Bus, Key Vault, the container registry — still has public network access enabled. There's no VNet, no private endpoint, anywhere in this project. That means the real protection is "you need a valid Managed Identity token or Entra ID sign-in," not "you can't even reach the server." Those are genuinely different security postures, and conflating them would overstate what's actually been built. Network isolation is a legitimate next step, not something this phase claims to have done.
