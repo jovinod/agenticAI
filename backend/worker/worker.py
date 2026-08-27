@@ -9,12 +9,12 @@ from azure.identity.aio import DefaultAzureCredential
 from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
 import psycopg
 from psycopg.conninfo import make_conninfo
-import redis.asyncio as redis
 from sqlmodel import create_engine, Session, select
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from models import TickerJob, TokenUsage, TickerProfile
 from agents.graph import run_research
 from llm.model_client import AZURE_OPENAI_DEPLOYMENT
+from redis_client import redis_client
 
 # No-op in Azure (no .env.local file there) — Container Apps sets real env vars directly.
 # Doesn't override an already-set env var, so an explicit shell export still wins if used.
@@ -73,19 +73,6 @@ else:
 SERVICEBUS_FQDN = os.environ.get("SERVICEBUS_FQDN", "alpharesearchsb.servicebus.windows.net")
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
 SERVICEBUS_EMBED_QUEUE_NAME = os.environ.get("SERVICEBUS_EMBED_QUEUE_NAME", "embedding-jobs")
-
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", "6380"))
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")  # unset locally; required for Azure Managed Redis
-REDIS_SSL = os.environ.get("REDIS_SSL", "false").lower() == "true"
-
-redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
-    ssl=REDIS_SSL,
-    decode_responses=True,
-)
 
 
 def seconds_until_midnight():

@@ -15,6 +15,7 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "python-dotenv>=1.2.2",
     "redis>=8.1.0",
+    "redis-entraid>=1.2.1",
     "requests>=2.34.2",
     "sqlmodel>=0.0.39",
     "tavily-python>=0.7.27",

@@ -10,25 +10,11 @@ Keyed by (job_id, ticker) -- one multi-ticker request fans out into several
 independent graph runs (one per ticker, see worker.py's process_ticker),
 each with its own five agents finishing at their own pace.
 """
-import os
-import redis.asyncio as redis
-
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", "6380"))
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")
-REDIS_SSL = os.environ.get("REDIS_SSL", "false").lower() == "true"
+from redis_client import redis_client as _redis_client
 
 # Short and self-cleaning on purpose -- long enough to cover a real run with
 # margin, short enough that this never becomes a second, stale result cache.
 PROGRESS_TTL_SECONDS = 600
-
-_redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
-    ssl=REDIS_SSL,
-    decode_responses=True,
-)
 
 
 def _key(job_id: str, ticker: str, agent_name: str) -> str:

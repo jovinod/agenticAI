@@ -58,8 +58,16 @@ ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost:5173")
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6380"))
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")  # unset locally; required for Azure Managed Redis
 REDIS_SSL = os.environ.get("REDIS_SSL", "false").lower() == "true"
+
+# Phase 8, Stage C -- Managed Identity instead of a password secret, when
+# running in Azure. Same reasoning as Postgres: the local Docker Redis
+# container has no AAD support at all, so this is a genuine second code
+# path. Unlike Postgres, a Redis connection needs its token refreshed and
+# re-AUTH'd periodically for the life of the connection, not just once at
+# connect time -- redis-entraid's CredentialProvider handles that refresh
+# loop automatically.
+REDIS_USE_ENTRA_AUTH = os.environ.get("REDIS_USE_ENTRA_AUTH", "false").lower() == "true"
 
 
 @asynccontextmanager
@@ -75,13 +83,22 @@ async def lifespan(app: FastAPI):
         queue_name=SERVICEBUS_QUEUE_NAME
     )
     await app.state.servicebus_sender.__aenter__()
-    app.state.redis = redis.Redis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        password=REDIS_PASSWORD,
-        ssl=REDIS_SSL,
-        decode_responses=True,
-    )
+    if REDIS_USE_ENTRA_AUTH:
+        from redis_entraid.cred_provider import create_from_default_azure_credential
+
+        app.state.redis = redis.Redis(
+            host=REDIS_HOST, port=REDIS_PORT, ssl=REDIS_SSL,
+            credential_provider=create_from_default_azure_credential(
+                scopes=("https://redis.azure.com/.default",)
+            ),
+            decode_responses=True,
+        )
+    else:
+        REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")  # unset locally
+        app.state.redis = redis.Redis(
+            host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, ssl=REDIS_SSL,
+            decode_responses=True,
+        )
     yield
     await app.state.servicebus_sender.__aexit__(None, None, None)
     await app.state.servicebus_client.close()
