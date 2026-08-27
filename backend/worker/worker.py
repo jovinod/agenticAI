@@ -122,6 +122,15 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, ch
             # just log and move on.
             print(f"No TickerJob row found for job {job_id}, ticker {ticker} -- skipping.")
             return
+        if task.status == "done":
+            # Phase 8 -- a message can be redelivered for a job that already
+            # finished successfully (e.g. complete_message() itself failing
+            # with MessageLockLostError after the real work and DB write both
+            # already succeeded -- hit this for real on a job with several
+            # slow searches). Redoing it would waste a real LLM/Tavily call
+            # for no benefit, since the result is already saved.
+            print(f"Job {job_id}, ticker {ticker} already done -- skipping redelivered message.")
+            return
         task.status = "running"
         session.add(task)
         session.commit()
@@ -261,11 +270,27 @@ async def main():
                     # and move on instead of taking down every OTHER job
                     # this worker replica happens to be handling too.
                     print(f"Malformed message, dropping: {exc}")
-                    await receiver.complete_message(msg)
+                    try:
+                        await receiver.complete_message(msg)
+                    except Exception as complete_exc:
+                        print(f"Failed to drop malformed message: {complete_exc}")
                     continue
 
                 await process_ticker(job_id, ticker, market, embed_sender, checkpointer)
-                await receiver.complete_message(msg)  # acknowledge — without this, Service Bus redelivers it
+                try:
+                    await receiver.complete_message(msg)  # acknowledge — without this, Service Bus redelivers it
+                except Exception as exc:
+                    # A real failure mode, not hypothetical: completing a message
+                    # can itself fail (e.g. MessageLockLostError -- hit this live
+                    # when a job with several searches took long enough that the
+                    # lock expired before this call ran). Letting that exception
+                    # propagate crashed the entire worker the same dangerous way
+                    # as an unparseable message, even though process_ticker above
+                    # already finished successfully and saved its result. Service
+                    # Bus will just redeliver and reprocess this message on its
+                    # own -- wasteful, but far better than taking every other
+                    # in-flight job down with it.
+                    print(f"Failed to complete message for {ticker} (job likely already done): {exc}")
 
 
 if __name__ == "__main__":

@@ -93,6 +93,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "azure-identity" },
+    { name = "azure-keyvault-secrets" },
     { name = "azure-servicebus" },
     { name = "httpx" },
     { name = "langgraph" },
@@ -112,6 +113,7 @@ dependencies = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
     { name = "azure-identity", specifier = ">=1.25.3" },
+    { name = "azure-keyvault-secrets", specifier = ">=4.11.2" },
     { name = "azure-servicebus", specifier = ">=7.14.3" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langgraph", specifier = ">=1.2.11" },
@@ -184,6 +186,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c5/0e/3a63efb48aa4a5ae2cfca61ee152fbcb668092134d3eb8bfda472dd5c617/azure_identity-1.25.3.tar.gz", hash = "sha256:ab23c0d63015f50b630ef6c6cf395e7262f439ce06e5d07a64e874c724f8d9e6", size = 286304, upload-time = "2026-03-13T01:12:20.892Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/9a/417b3a533e01953a7c618884df2cb05a71e7b68bdbce4fbdb62349d2a2e8/azure_identity-1.25.3-py3-none-any.whl", hash = "sha256:f4d0b956a8146f30333e071374171f3cfa7bdb8073adb8c3814b65567aa7447c", size = 192138, upload-time = "2026-03-13T01:12:22.951Z" },
+]
+
+[[package]]
+name = "azure-keyvault-secrets"
+version = "4.11.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/15/d5/41043abed42ca3ab6930c52a25956a8eb468af2db0acb5ce446ff5437ddc/azure_keyvault_secrets-4.11.2.tar.gz", hash = "sha256:c0d86db01a8ae34d1db92ec6b9ef92d9a2aef7fbb1a67c0956513d46b85d7adb", size = 116119, upload-time = "2026-08-25T21:55:39.774Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/7a/dbdaf5f11b5a410fd29be4ac544880ff970ac09de7274f141801c90e179e/azure_keyvault_secrets-4.11.2-py3-none-any.whl", hash = "sha256:7abdd4a830bd8f4998bea0edbe69b8a772d672c17eabfdf3f77d8e4ef29442e9", size = 103809, upload-time = "2026-08-25T21:55:41.372Z" },
 ]
 
 [[package]]
