@@ -155,6 +155,37 @@ Fixed at the source, not patched around the symptom: the Tavily key is now resol
 
 **Verified on real jobs, before and after.** `NVDA` reproduced the actual bug live — slow searches, a real `MessageLockLostError` — while confirming the underlying work and database write had both still succeeded, and that Service Bus's own queue state came back clean afterward with nothing stuck. `MU`, after the fix, completed in about 43 seconds total, comfortably inside the message lock window, with no errors anywhere in the chain.
 
+## Stage E: The Trust Boundary, Written Down Honestly
+
+Every prior stage in this chapter built one piece of authentication. Stage E's job is different: step back and write down, in one place, exactly what's trusted, what isn't, and where the real edges are — not as a diagram that looks reassuring, but as an accurate one.
+
+**What the browser can reach.** Exactly one thing: `alpha-api`'s public HTTPS endpoints. Nothing else in this system has a public-facing door a browser can knock on directly. Every request to `/research`, `/research/{job_id}`, and `/search` requires a real Entra ID sign-in and passes through the authorization allow-list built in Stage A. A browser never talks to Postgres, Redis, Service Bus, Azure OpenAI, or Tavily — it only ever talks to `alpha-api`, and only after proving who it is.
+
+**What only the backend touches, and how each hop actually authenticates:**
+
+| From | To | Auth mechanism |
+|---|---|---|
+| Browser | `alpha-api` | Entra ID sign-in (MSAL) + JWT validation + allow-list |
+| `alpha-api`, `alpha-worker`, `alpha-embed-worker` | Service Bus | Managed Identity (Stage B) |
+| `alpha-api`, `alpha-worker`, `alpha-embed-worker` | Postgres | Managed Identity (Stage B) |
+| `alpha-api`, `alpha-worker` | Redis | Managed Identity (Stage C) |
+| `alpha-worker`, `alpha-embed-worker`, `alpha-api` | Azure OpenAI (via APIM) | APIM subscription key → APIM's own Managed Identity to Foundry |
+| `alpha-worker` | Tavily | Key Vault secret, Managed-Identity-gated (Stage D) |
+| KEDA (autoscaling) | Service Bus | Managed Identity (found and fixed while writing this section — see below) |
+
+**Two things this table deliberately does not gloss over:**
+
+1. **The boundary is identity-based, not network-based.** Every resource in this system — Postgres, Redis, Service Bus, Key Vault, the container registry — still has public network access enabled. There's no VNet, no private endpoint, anywhere in this project. That means the real protection is "you need a valid Managed Identity token or Entra ID sign-in," not "you can't even reach the server." Those are genuinely different security postures, and conflating them would overstate what's actually been built. Network isolation is a legitimate next step, not something this phase claims to have done.
+2. **One static secret still remains, by necessity, not oversight.** The APIM subscription key isn't Managed-Identity-based on the *caller's* side — Tavily and the four data stores all got that treatment, but APIM's own subscription-key model is how *callers* authenticate to APIM (APIM's own call onward to Foundry is Managed Identity, which is a separate hop). Modernizing this further — e.g., validating a JWT at the APIM layer instead of a subscription key — is a real, legitimate future step, not something this project has done yet.
+
+### Two More Real Bugs, Found by Writing This Down Honestly
+
+Building this table meant re-verifying every row against the actual live system rather than trusting memory of what was built — and that check surfaced two real, live bugs that had nothing to do with documentation.
+
+**The KEDA autoscaler was silently broken**, and it was this chapter's own earlier cleanup that broke it. Stage B deleted the Service Bus SAS secrets once the *application* code moved to Managed Identity — but `alpha-worker` and `alpha-embed-worker`'s KEDA scale rules (a separate thing from the app's own connection code, easy to forget) still pointed at those exact deleted secrets. Nothing crashed — `alpha-worker`'s minimum-one-replica setting and steady test traffic kept a replica alive the whole time — but real autoscaling (scaling up under load, and for `alpha-embed-worker`, scaling up *from zero* at all) was quietly non-functional. Fixing it properly took three real, live-discovered corrections: the installed CLI had no flag for identity-based scale rules at all (worked around via a full `--yaml` template edit); the `namespace` field needed the bare namespace name, not the FQDN used everywhere else in this project (confirmed by reading the actual DNS failure — a doubled `.servicebus.windows.net.servicebus.windows.net` — not guessed); and KEDA's own metric polling needs a broader "Data Owner" role than the "Data Receiver" role the app's own code needs, confirmed against KEDA's own scaler documentation rather than assumed.
+
+**The frontend was hiding its own real errors.** While all this infrastructure work was happening, a live user hit a genuine "Could not reach the server" error — except the backend was completely healthy the whole time (proven directly: curl succeeded, the CORS preflight succeeded, no error in any log). The real cause turned out to be `App.jsx` itself: every possible failure — an expired sign-in session, a clean `401`/`403` from a perfectly reachable server, or an actual network failure — funneled into the exact same generic message. That's a real cost, not a hypothetical one: it made a simple "please sign in again" situation look identical to a full backend outage, and real time went into checking backend health before the actual cause was found by reading the frontend's own error-handling code. Fixed by staging the error handling so each failure point reports what actually happened — verified live when the same user's next real submission succeeded immediately after signing in again.
+
 ## Where This Stands
 
-Stages A through D are all genuinely complete. Every one of `alpha-api`, `alpha-worker`, and `alpha-embed-worker`'s connections — to Entra ID, Service Bus, Postgres, Redis, and now the one third-party secret this app depends on — run on real Azure identity or Key Vault instead of a long-lived plaintext credential, and access-key/password authentication has been switched off entirely at the resource level for all three data stores. One item remains on the original Phase 8 plan: documenting the trust boundary explicitly (Stage E). A separately tracked, deliberately deferred item from Stage C: the Redis OSS Cluster routing gap (a plain client against a sharded cache), unrelated to auth and left open by explicit choice rather than oversight.
+All five stages of Phase 8 are complete. Every one of `alpha-api`, `alpha-worker`, and `alpha-embed-worker`'s connections — to Entra ID, Service Bus, Postgres, Redis, and the one third-party secret this app depends on — run on real Azure identity or Key Vault instead of a long-lived plaintext credential, access-key/password authentication is switched off entirely at the resource level for all three data stores, and the trust boundary is written down honestly, limitations included. Two items remain deliberately open, tracked rather than hidden: the Redis OSS Cluster routing gap from Stage C (a plain client against a sharded cache), and the two named limitations above (no network isolation, one remaining static APIM key) — both real, both known, neither silently left for someone to discover later.

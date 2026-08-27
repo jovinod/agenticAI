@@ -10,7 +10,7 @@ was built (concept explanations now live there, not in a separate glossary file)
 
 ## Status
 
-**Phase 1 — Frontend shell: complete.** **Phase 2 — Backend skeleton: complete.** **Phase 3 — MCP tools + real data: complete.** **Phase 4 — First agent (Azure AI Foundry + tool-calling + token/cost logging): complete.** **Phase 5 — Multi-agent + Skills + real three-tier memory: complete.** Five-agent LangGraph pipeline (Fundamentals/Technical/News/Risk/Synthesizer), genuinely concurrent execution, Azure API Management fronting Foundry, real KEDA autoscaling, Skills genuinely discoverable, and all three memory tiers (short-term/Redis, profile/Postgres, semantic/pgvector via a standalone `/search` feature) — all deployed and verified live. **Phase 6 — Checkpointing & durable workflows: complete.** LangGraph's built-in Postgres checkpointing wired into the research graph, verified against a genuine `az containerapp revision restart` mid-job on the live deployment, not a simulated crash. **Phase 7 — Resilience: complete.** `RetryPolicy` for transient failures and in-function graceful degradation for persistent ones on all five agent nodes, verified live via a genuine corrupted-secret failure injection (not simulated) that surfaced and fixed a real bug in `worker.py`'s post-processing. **Phase 8 — Auth & trust boundaries: Stages A–D complete (4 of 5 stages).** Entra ID sign-in on the frontend, real backend token validation plus an authorization allow-list, deployed and verified live -- both directions of the allow-list proven with one real token. Stages B–D (Managed Identity for Service Bus, Postgres, and Redis; Key Vault for the Tavily key): `alpha-api`/`alpha-worker`/`alpha-embed-worker` now authenticate to Service Bus, Postgres, and Redis via Managed Identity instead of SAS connection strings and password secrets, with access-key auth disabled entirely at the resource level for all three; the one remaining third-party secret (Tavily) lives in a real Key Vault, Managed-Identity-gated. Several real production incidents were found and fixed at the root cause along the way -- a malformed-message crash-loop gap in both workers; a Postgres `INSERT ... RETURNING` permission gap caught live on a real user's research job; a "blocker" that turned out to be a wrong-database mistake rather than an Azure bug (`pgaadauth_create_principal` only exists in the `postgres` maintenance database); and, while scoping Stage D, a genuine secret-leakage incident (two services' Docker images had `.env.local` baked directly in, due to a missing `.dockerignore` entry) that triggered rotating the Postgres admin password, deleting unused Service Bus SAS keys, regenerating the shared APIM key, and rotating the Tavily key itself -- followed by a second, related incident where the Key Vault fix's own per-call latency caused a real `MessageLockLostError` on a live job, fixed by resolving the secret once instead of per-call and hardening the message-completion path. A separate, pre-existing Redis OSS-cluster routing gap was found and deliberately deferred as its own tracked item, not silently fixed. Verified end-to-end on multiple real user-submitted jobs throughout, watched live across all three services. Stage E (trust-boundary docs) still ahead.
+**Phase 1 — Frontend shell: complete.** **Phase 2 — Backend skeleton: complete.** **Phase 3 — MCP tools + real data: complete.** **Phase 4 — First agent (Azure AI Foundry + tool-calling + token/cost logging): complete.** **Phase 5 — Multi-agent + Skills + real three-tier memory: complete.** Five-agent LangGraph pipeline (Fundamentals/Technical/News/Risk/Synthesizer), genuinely concurrent execution, Azure API Management fronting Foundry, real KEDA autoscaling, Skills genuinely discoverable, and all three memory tiers (short-term/Redis, profile/Postgres, semantic/pgvector via a standalone `/search` feature) — all deployed and verified live. **Phase 6 — Checkpointing & durable workflows: complete.** LangGraph's built-in Postgres checkpointing wired into the research graph, verified against a genuine `az containerapp revision restart` mid-job on the live deployment, not a simulated crash. **Phase 7 — Resilience: complete.** `RetryPolicy` for transient failures and in-function graceful degradation for persistent ones on all five agent nodes, verified live via a genuine corrupted-secret failure injection (not simulated) that surfaced and fixed a real bug in `worker.py`'s post-processing. **Phase 8 — Auth & trust boundaries: complete, all 5 stages.** Entra ID sign-in on the frontend, real backend token validation plus an authorization allow-list, deployed and verified live -- both directions of the allow-list proven with one real token. Stages B–D (Managed Identity for Service Bus, Postgres, and Redis; Key Vault for the Tavily key): `alpha-api`/`alpha-worker`/`alpha-embed-worker` now authenticate to Service Bus, Postgres, and Redis via Managed Identity instead of SAS connection strings and password secrets, with access-key auth disabled entirely at the resource level for all three; the one remaining third-party secret (Tavily) lives in a real Key Vault, Managed-Identity-gated. Stage E documents the trust boundary honestly: identity-based, not network-based (every resource still has public network access enabled, no VNet/private endpoints anywhere), with one named remaining static secret (the shared APIM subscription key). Numerous real production incidents were found and fixed at the root cause along the way -- a malformed-message crash-loop gap in both workers; a Postgres `INSERT ... RETURNING` permission gap caught live on a real user's research job; a "blocker" that turned out to be a wrong-database mistake rather than an Azure bug (`pgaadauth_create_principal` only exists in the `postgres` maintenance database); a genuine secret-leakage incident (two services' Docker images had `.env.local` baked directly in) that triggered rotating the Postgres admin password, deleting unused Service Bus SAS keys, regenerating the shared APIM key, and rotating the Tavily key; a `MessageLockLostError` caused by the Key Vault fix's own per-call latency; and, while writing Stage E's trust-boundary table, a self-inflicted KEDA autoscaler regression (scale rules still pointed at SAS secrets deleted during Stage B cleanup, fixed with Managed Identity scale rules after three live-discovered corrections) plus a frontend bug that masked every real error -- expired session, clean 401/403, or genuine network failure -- behind one generic message. A separate, pre-existing Redis OSS-cluster routing gap was found and deliberately deferred as its own tracked item. Verified end-to-end on many real user-submitted jobs throughout, watched live across all services.
 
 ## Architecture
 
@@ -67,24 +67,25 @@ flowchart TD
         OpenAI["Azure OpenAI: alpha-research-openai (South India)\ndeployments: gpt-5-mini, text-embedding-3-small"]
     end
 
-    User -->|HTTPS| Frontend
-    Frontend -->|"HTTPS (VITE_API_URL, baked in at build)"| API
-    API -->|"send (send-only key)"| SB
-    SB -->|"listen (listen-only key), one msg per replica"| WorkerGroup
-    SB -->|"listen (listen-only key), embedding-jobs"| EmbedWorker
-    API -->|"read/write (admin user+pass)"| PG
-    WorkerGroup -->|"read/write (admin user+pass)"| PG
+    User -->|"HTTPS + Entra ID sign-in"| Frontend
+    Frontend -->|"HTTPS + Bearer JWT (VITE_API_URL, baked in at build)"| API
+    API -->|"send — managed identity"| SB
+    SB -->|"listen — managed identity, one msg per replica"| WorkerGroup
+    SB -->|"listen — managed identity, embedding-jobs"| EmbedWorker
+    API -->|"read/write — managed identity"| PG
+    WorkerGroup -->|"read/write — managed identity"| PG
     WorkerGroup -->|"checkpoint check + write per<br/>super-step (thread_id = job_id:ticker)"| PG
-    EmbedWorker -->|"write — vector embedding\n(admin user+pass)"| PG
-    API -->|"cache check (read) — access key"| Redis
-    WorkerGroup -->|"cache write — access key"| Redis
+    EmbedWorker -->|"write — vector embedding\nmanaged identity"| PG
+    API -->|"cache check (read) — managed identity"| Redis
+    WorkerGroup -->|"cache write — managed identity"| Redis
     WorkerGroup -->|"tool-calling + token/cost logging\nOcp-Apim-Subscription-Key"| APIM
-    WorkerGroup -->|"publish report text\n(send-only key), embedding-jobs"| SB
+    WorkerGroup -->|"publish report text\n(managed identity), embedding-jobs"| SB
     EmbedWorker -->|"embed report text\nOcp-Apim-Subscription-Key"| APIM
     API -->|"embed search query\nOcp-Apim-Subscription-Key"| APIM
     APIM -->|"managed identity (AAD token)\nno stored key"| OpenAI
-    SB -.->|"KEDA polls queue depth\n(same servicebus-conn secret)"| WorkerGroup
-    SB -.->|"KEDA polls queue depth"| EmbedWorker
+    WorkerGroup -->|"fetch Tavily key — managed identity"| KV["Key Vault: alpha-research-kv"]
+    SB -.->|"KEDA polls queue depth\n(managed identity)"| WorkerGroup
+    SB -.->|"KEDA polls queue depth\n(managed identity)"| EmbedWorker
     ENV -.->|pulls images| ACR
     ENV -.->|logs/metrics| LAW
 ```
