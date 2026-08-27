@@ -44,6 +44,20 @@ function ResearchApp() {
     }
   }
 
+  // Every failure used to fall into one generic "could not reach the server"
+  // message -- a real problem found live: an expired session, a 401/403 from
+  // a genuinely reachable server, and an actual network failure all looked
+  // identical to the user, which made a session-expiry issue look like a
+  // backend outage. describeResponseError covers the "we got an HTTP
+  // response, just not a good one" case; callers handle the token-acquisition
+  // and network-failure cases directly, since those never reach a response.
+  function describeResponseError(response) {
+    if (response.status === 401 || response.status === 403) {
+      return 'Your session has expired or you are not authorized. Please sign in again.'
+    }
+    return `Server error (${response.status}). Please try again in a moment.`
+  }
+
   async function handleSubmit() {
     const parsed = tickerInput
       .split(',')
@@ -65,9 +79,18 @@ function ResearchApp() {
     setTickers(parsed)
     setStatus('loading')
 
+    let token
     try {
-      const token = await getAccessToken()
-      const response = await fetch(`${API_URL}/research`, {
+      token = await getAccessToken()
+    } catch (err) {
+      setError('Your session has expired. Please sign in again.')
+      setStatus('idle')
+      return
+    }
+
+    let response
+    try {
+      response = await fetch(`${API_URL}/research`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -75,15 +98,20 @@ function ResearchApp() {
         },
         body: JSON.stringify({ tickers: parsed, market }),
       })
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`)
-      }
-      const { job_id } = await response.json()
-      pollStatus(job_id)
     } catch (err) {
-      setError('Could not reach the server. Check that the backend is running and try again.')
+      setError('Could not reach the server. Check your connection and try again.')
       setStatus('idle')
+      return
     }
+
+    if (!response.ok) {
+      setError(describeResponseError(response))
+      setStatus('idle')
+      return
+    }
+
+    const { job_id } = await response.json()
+    pollStatus(job_id)
   }
 
   // Service Bus delivery can genuinely take up to ~60s sometimes (a known, logged
@@ -97,31 +125,46 @@ function ResearchApp() {
     const interval = setInterval(async () => {
       attempts += 1
 
+      let token
       try {
-        const token = await getAccessToken()
-        const response = await fetch(`${API_URL}/research/${jobId}`, {
+        token = await getAccessToken()
+      } catch (err) {
+        clearInterval(interval)
+        setError('Your session has expired. Please sign in again.')
+        setStatus('idle')
+        return
+      }
+
+      let response
+      try {
+        response = await fetch(`${API_URL}/research/${jobId}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
-        if (!response.ok) {
-          throw new Error(`Server returned ${response.status}`)
-        }
-        const data = await response.json()
-
-        if (data.status === 'done') {
-          clearInterval(interval)
-          setReport(data.result)
-          setStatus('done')
-          return
-        }
-        if (data.error) {
-          clearInterval(interval)
-          setError(`Something went wrong: ${data.error}`)
-          setStatus('idle')
-          return
-        }
       } catch (err) {
         clearInterval(interval)
         setError('Lost connection to the server while waiting for results. Please try again.')
+        setStatus('idle')
+        return
+      }
+
+      if (!response.ok) {
+        clearInterval(interval)
+        setError(describeResponseError(response))
+        setStatus('idle')
+        return
+      }
+
+      const data = await response.json()
+
+      if (data.status === 'done') {
+        clearInterval(interval)
+        setReport(data.result)
+        setStatus('done')
+        return
+      }
+      if (data.error) {
+        clearInterval(interval)
+        setError(`Something went wrong: ${data.error}`)
         setStatus('idle')
         return
       }
