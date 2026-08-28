@@ -173,56 +173,89 @@ Every prior stage in this chapter built one piece of authentication. Stage E's j
 | `alpha-worker` | Tavily | Key Vault secret, Managed-Identity-gated (Stage D) |
 | KEDA (autoscaling) | Service Bus | Managed Identity (found and fixed while writing this section — see below) |
 
-That table in diagram form — deliberately showing *only* identity relationships (who authenticates as whom, who issues and validates tokens, where the one remaining static secret sits), not the message/data flow already diagrammed elsewhere in this project:
+That table as a diagram — deliberately showing *only* identity relationships (who authenticates as whom, who issues and validates tokens, where the one remaining static secret sits), not the message/data flow already diagrammed elsewhere in this project. A sequence diagram, not a flowchart: with this many participants a flowchart's crossing arrows got genuinely hard to follow, where a sequence diagram lays the same story out top-to-bottom, one interaction at a time:
 
 ```mermaid
-flowchart TD
-    User(["User's Microsoft account"])
-    Entra{{"Microsoft Entra ID\n(single tenant)"}}
-    Allow[["ALLOWED_USERS allow-list\n(authorization — separate from Entra ID)"]]
-    API["alpha-api"]
+sequenceDiagram
+    actor User
+    participant API as alpha-api
+    participant Entra as Microsoft Entra ID
+    participant Worker as alpha-worker
+    participant Embed as alpha-embed-worker
+    participant Data as Service Bus / Postgres / Redis
+    participant KV as Key Vault
+    participant APIM as API Management
+    participant AOAI as Azure OpenAI
+    participant KEDA
 
-    User -->|"1. sign in — MSAL"| Entra
-    Entra -->|"2. JWT access token"| User
-    User -->|"3. Bearer JWT"| API
-    API -->|"4. validate token"| Entra
-    API -->|"5. check signed-in email"| Allow
+    rect rgb(235, 245, 255)
+    Note over User, Entra: Human identity
+    User->>Entra: sign in (MSAL)
+    Entra-->>User: JWT access token
+    User->>API: Bearer JWT
+    API->>Entra: validate token
+    Note right of API: check signed-in email against ALLOWED_USERS
+    end
 
-    APIId(("alpha-api's\nManaged Identity"))
-    WorkerId(("alpha-worker's\nManaged Identity"))
-    EmbedId(("alpha-embed-worker's\nManaged Identity"))
-    APIMId(("APIM's own\nManaged Identity"))
+    rect rgb(245, 245, 225)
+    Note over API, Data: Machine identity — each app has its own Managed Identity
+    API->>Entra: request AAD token (own identity)
+    Entra-->>API: token
+    API->>Data: authenticated call
 
-    API -.->|has| APIId
-    Worker["alpha-worker"] -.->|has| WorkerId
-    EmbedWorker["alpha-embed-worker"] -.->|has| EmbedId
-    APIM["API Management"] -.->|has| APIMId
+    Worker->>Entra: request AAD token (own identity)
+    Entra-->>Worker: token
+    Worker->>Data: authenticated call
 
-    APIId & WorkerId & EmbedId & APIMId -->|"AAD token request"| Entra
+    Embed->>Entra: request AAD token (own identity)
+    Entra-->>Embed: token
+    Embed->>Data: authenticated call
+    end
 
-    SB[("Service Bus")]
-    PG[("Postgres")]
-    Redis[("Redis")]
-    KV[("Key Vault")]
-    OpenAI[("Azure OpenAI")]
+    rect rgb(230, 250, 230)
+    Note over Worker, KV: Third-party secret — still Managed-Identity-gated
+    Worker->>Entra: request AAD token (own identity)
+    Entra-->>Worker: token
+    Worker->>KV: authenticated request
+    KV-->>Worker: Tavily API key (released only to this identity)
+    end
 
-    APIId -->|token| SB & PG & Redis
-    WorkerId -->|token| SB & PG & Redis & KV
-    EmbedId -->|token| SB & PG
-    APIMId -->|token| OpenAI
+    rect rgb(255, 250, 225)
+    Note over KEDA, Data: Autoscaling also uses a real identity, not a secret
+    KEDA->>Entra: request AAD token (as alpha-worker / alpha-embed-worker)
+    Entra-->>KEDA: token
+    KEDA->>Data: poll queue depth
+    end
 
-    KV -->|"releases Tavily secret\n(only to this one identity)"| Worker
-
-    KEDA["KEDA autoscaler"] -.->|"polls queue depth as"| WorkerId
-    KEDA -.->|"polls queue depth as"| EmbedId
-
-    API & Worker & EmbedWorker -->|"Ocp-Apim-Subscription-Key\n(the one static secret left — not identity)"| APIM
+    rect rgb(255, 235, 235)
+    Note over API, AOAI: The one remaining static secret — not identity
+    API->>APIM: Ocp-Apim-Subscription-Key
+    Worker->>APIM: Ocp-Apim-Subscription-Key
+    Embed->>APIM: Ocp-Apim-Subscription-Key
+    APIM->>Entra: request AAD token (own identity)
+    Entra-->>APIM: token
+    APIM->>AOAI: authenticated call
+    end
 ```
 
 **Two things this table deliberately does not gloss over:**
 
 1. **The boundary is identity-based, not network-based.** Every resource in this system — Postgres, Redis, Service Bus, Key Vault, the container registry — still has public network access enabled. There's no VNet, no private endpoint, anywhere in this project. That means the real protection is "you need a valid Managed Identity token or Entra ID sign-in," not "you can't even reach the server." Those are genuinely different security postures, and conflating them would overstate what's actually been built. Network isolation is a legitimate next step, not something this phase claims to have done.
 2. **One static secret still remains, by necessity, not oversight.** The APIM subscription key isn't Managed-Identity-based on the *caller's* side — Tavily and the four data stores all got that treatment, but APIM's own subscription-key model is how *callers* authenticate to APIM (APIM's own call onward to Foundry is Managed Identity, which is a separate hop). Modernizing this further — e.g., validating a JWT at the APIM layer instead of a subscription key — is a real, legitimate future step, not something this project has done yet.
+
+### What About the Agents Themselves?
+
+Everything above answers "how does a *service* prove who it is." A different question, easy to miss, is how the *agents* running inside `alpha-worker` are constrained — the five LangGraph nodes (Fundamentals, Technical, News, Risk, Synthesizer) that actually decide what to research and, in one case, what to search for. Checking the real code (`agent_harness.py`, `agents/*.py`) rather than assuming gives a precise, sometimes surprising answer.
+
+**Agents don't have their own identity.** There's no separate "Fundamentals agent" or "News agent" Managed Identity in Entra ID — an agent is just Python code running inside `alpha-worker`'s one process, and it inherits whatever that process's Managed Identity can reach. Authentication, in the sense this whole chapter has used the word, stops at the service boundary. Inside `alpha-worker`, there's no further identity check between one agent and another, or between an agent and the process hosting it.
+
+**So what actually limits what an agent can do? Capability, not identity.** Checking the real tool registries settles this precisely rather than by assumption: of the five agents, **four have zero tool-calling ability at all.** Fundamentals, Technical, Risk, and Synthesizer each call `run_synthesis()` — a single LLM call with `tools=[]`. The model can generate text; it cannot request anything. Fundamentals' actual data fetch (`fetch_stock_data`) happens in plain Python *before* the model is ever invoked — never exposed as something the LLM could choose to call, because there was never a real choice to make (Chapter 4 covers why). Only **News** runs the genuine tool-calling loop, and its own `TOOL_REGISTRY` contains exactly two things: `search_web` and whatever `discover_skills()` finds (today, just `assess_news_sentiment`). That registry is a real enforcement point, not a suggestion: `agent_harness.py`'s `_call_tool` looks up the requested function name in *that specific agent's* registry, and a name that isn't there — a hallucinated tool, or a real one belonging to a different agent — gets `{"error": "unknown tool: ..."}` back, never an actual invocation. An agent's access is the literal union of what's in its own registry, nothing inferred or implied beyond that.
+
+**There's a blast-radius control here too, separate from capability.** `DEFAULT_MAX_TURNS = 5` caps how many tool-calling round-trips a single agent run can take before the harness gives up and returns whatever partial results it has. The comment in the code is explicit about why: "a confused or looping model could call tools indefinitely, burning time and ... real money with no result." This isn't a security boundary in the access-control sense — it doesn't stop an agent from doing something it's not allowed to do — but it is a genuine control on how much damage an agent that misbehaves *within its allowed capability* can cause in one run.
+
+**Is process isolation also being used to limit access here? Yes — genuinely, if somewhat by accident.** The News agent's `search_web` tool doesn't call Tavily directly; it spawns `search_server.py` as a separate OS subprocess over MCP's stdio transport. That subprocess boundary turned out to double as a real security boundary once Stage D's latency fix landed: the subprocess is no longer handed the worker's environment wholesale, only the one variable it explicitly needs (`env={"TAVILY_API_KEY": ...}` in `tools/web_search.py`). That subprocess has no `DATABASE_HOST`, no `REDIS_HOST`, no Service Bus configuration, no Key Vault URL — none of it is in its environment at all, not merely unused. If a future prompt-injection attack via search results, or a bug in the Tavily client library, ever did something unexpected inside that subprocess, there is *nothing sensitive there for it to reach* — not because anyone deliberately designed a sandbox, but because the subprocess boundary already existed for an unrelated reason (Option A of the MCP graduation plan in `decisions.md`) and Stage D's env-passing fix happened to make it a real one. Worth naming honestly: this wasn't built as an agent-security feature and shouldn't be oversold as a deliberate sandbox — but it is a real, currently-true isolation boundary, not a hypothetical one.
+
+**What this section doesn't claim.** The four synthesis-only agents and the one tool-calling agent all still run inside the *same* `alpha-worker` process, sharing its one Managed Identity. If a future tool were ever added with broader reach — something that touched Postgres directly, say, or executed arbitrary code — nothing described here would stop an agent from using it once it's in a registry; the whole model depends on the *registry* staying narrow, not on any deeper sandbox around the agent loop itself. There's no separate, more restricted identity for "the part of the process that runs LLM-directed tool calls" versus "the part that talks to Azure resources directly." That's a real, named limitation, in the same spirit as the two above: worth knowing, not something to fix reflexively, and a legitimate thing to revisit if a future tool's capability ever grows past "search the web" and "run a deterministic Python function."
 
 ### Two More Real Bugs, Found by Writing This Down Honestly
 
