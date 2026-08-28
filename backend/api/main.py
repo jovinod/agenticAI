@@ -4,6 +4,9 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal
 import json
+from azure.monitor.opentelemetry import configure_azure_monitor
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,6 +21,14 @@ from models import TickerJob, ResearchReport
 from llm.embeddings_client import embed
 from auth import require_user
 from pii_scrub import scrub_pii
+
+# Phase 10, Stage B -- no-op locally (APPLICATIONINSIGHTS_CONNECTION_STRING is
+# only set in Azure), same "real service in Azure, silent no-op locally"
+# shape as every other Azure-only feature in this project. Called before the
+# FastAPI app exists: this sets up the global tracer/logger providers that
+# FastAPIInstrumentor and every `trace.get_tracer(...)` call below plug into.
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    configure_azure_monitor()
 
 # Phase 8, Stage B -- Managed Identity instead of a password secret, when
 # running in Azure. DATABASE_HOST is only ever set there: the local Docker
@@ -108,6 +119,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+FastAPIInstrumentor.instrument_app(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -131,6 +143,12 @@ def read_root():
 async def create_research(request: ResearchRequest):
     job_id = str(uuid.uuid4())
     today = date.today().isoformat()
+
+    # Phase 10, Stage B -- App Insights' own operation ID isn't ours to query
+    # by; stamping our own job_id onto the request span is what makes "find
+    # every trace for this job" possible later, same correlation-ID gap
+    # Stage A's Azure OpenAI diagnostic logs surfaced for a different hop.
+    trace.get_current_span().set_attribute("job_id", job_id)
 
     for ticker in request.tickers:
         cache_key = f"research:{request.market}:{ticker}:{today}"
