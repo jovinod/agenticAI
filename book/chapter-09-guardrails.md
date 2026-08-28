@@ -128,32 +128,38 @@ Both ran the actual deployed code, in the actual production container, against t
 
 ## The Flow So Far
 
-Three separate paths, three different kinds of check — worth seeing together, since it's easy to read about each one in isolation and miss that they don't all use the same mechanism:
+Three separate paths, three different kinds of check — split into three small diagrams rather than one large one, the same fix Chapter 8's trust-boundary diagram needed: a single flowchart wide enough to hold all three barely fits on screen, let alone survives a zoom.
+
+**1. Direct injection — a user's own message**
 
 ```mermaid
 flowchart TD
-    subgraph Direct["Direct injection: a user's own message"]
-        UserMsg["The signed-in user's own text,<br/>as part of a request"] --> AOAI["Azure OpenAI's built-in filter<br/>(out of the box, zero config,<br/>no code in this repo)"]
-        AOAI -->|"jailbreak: detected"| Block["HTTP 400 -- blocked before<br/>any completion happens"]
-        AOAI -->|"clean"| ModelA["Model call proceeds"]
-    end
-
-    subgraph Indirect["Indirect injection: content a tool hands back"]
-        Search["News / Devil's Advocate call<br/>search_web(query)"] --> Tavily["Tavily -- real open-web results"]
-        Tavily --> Shields["scan_documents()<br/>Azure AI Content Safety Prompt Shields<br/>(real API, wired by us -- Phase 9)"]
-        Shields -->|"attackDetected: true"| Redact["Result replaced with a<br/>placeholder string"]
-        Shields -->|"attackDetected: false"| ToolResult["Real result kept as-is"]
-        Redact --> ModelB
-        ToolResult --> ModelB["Fed into the model as a tool-role message --<br/>confirmed live NOT covered by Azure OpenAI's<br/>own filter, which only scans user-role turns"]
-    end
-
-    subgraph FreeText["The one free-text user input"]
-        SearchQ["GET /search?q=..."] --> Scrub["scrub_pii()<br/>our own regex -- email + phone<br/>(Phase 9, not an Azure service)"]
-        Scrub --> Embed["embed() + pgvector similarity search"]
-    end
+    A["User's own text,<br/>part of a request"] --> B["Azure OpenAI's built-in filter<br/>(out of the box, zero config,<br/>no code in this repo)"]
+    B -->|"jailbreak: detected"| C["HTTP 400 -- blocked"]
+    B -->|"clean"| D["Model call proceeds"]
 ```
 
-**None of the three boxes doing the actual checking are the same kind of thing.** The top path is entirely Azure OpenAI's own behavior — no code in this repository, on by default, not something Phase 9 built. The middle path is a real Azure service this phase provisioned and wired in deliberately, because the top path's coverage stops exactly where it does. The bottom path is genuinely ours — plain Python regex, no external call at all — because the problem it solves (two well-known text shapes) doesn't need a classifier. Three checks, three different owners, chosen deliberately rather than defaulting to one tool for everything.
+**2. Indirect injection — content a tool hands back**
+
+```mermaid
+flowchart TD
+    A["News / Devil's Advocate:<br/>search_web(query)"] --> B["Tavily -- real<br/>open-web results"]
+    B --> C["scan_documents()<br/>Content Safety Prompt Shields<br/>(wired by us -- Phase 9)"]
+    C -->|"attack detected"| D["Placeholder string"]
+    C -->|"clean"| E["Real result kept"]
+    D --> F["Fed to the model as a<br/>tool-role message -- NOT covered<br/>by Azure OpenAI's own filter"]
+    E --> F
+```
+
+**3. The one free-text user input**
+
+```mermaid
+flowchart TD
+    A["GET /search?q=..."] --> B["scrub_pii()<br/>our own regex --<br/>email + phone (Phase 9)"]
+    B --> C["embed() + pgvector<br/>similarity search"]
+```
+
+**None of the three checks are the same kind of thing.** Diagram 1 is entirely Azure OpenAI's own behavior — no code in this repository, on by default, not something Phase 9 built. Diagram 2 is a real Azure service this phase provisioned and wired in deliberately, because diagram 1's coverage stops exactly where it does — confirmed live, a tool-role message never reaches the check in diagram 1 at all. Diagram 3 is genuinely ours — plain Python regex, no external call — because the problem it solves (two well-known text shapes) doesn't need a classifier. Three checks, three different owners, chosen deliberately rather than defaulting to one tool for everything.
 
 ## Azure Components Used This Chapter
 
