@@ -173,32 +173,33 @@ Every prior stage in this chapter built one piece of authentication. Stage E's j
 | `alpha-worker` | Tavily | Key Vault secret, Managed-Identity-gated (Stage D) |
 | KEDA (autoscaling) | Service Bus | Managed Identity (found and fixed while writing this section — see below) |
 
-That table as a diagram — deliberately showing *only* identity relationships (who authenticates as whom, who issues and validates tokens, where the one remaining static secret sits), not the message/data flow already diagrammed elsewhere in this project. A sequence diagram, not a flowchart: with this many participants a flowchart's crossing arrows got genuinely hard to follow, where a sequence diagram lays the same story out top-to-bottom, one interaction at a time:
+That table as a diagram — deliberately showing *only* identity relationships (who authenticates as whom, who issues and validates tokens, where the one remaining static secret sits), not the message/data flow already diagrammed elsewhere in this project. A sequence diagram, not a flowchart: a flowchart's crossing arrows got hard to follow. Split into five small diagrams, one per phase of the story, rather than one large one — each is small enough to read at a glance with no zooming or scrolling needed.
+
+**1. Human identity — signing in**
 
 ```mermaid
 sequenceDiagram
     actor User
     participant API as alpha-api
     participant Entra as Microsoft Entra ID
-    participant Worker as alpha-worker
-    participant Embed as alpha-embed-worker
-    participant Data as Service Bus / Postgres / Redis
-    participant KV as Key Vault
-    participant APIM as API Management
-    participant AOAI as Azure OpenAI
-    participant KEDA
 
-    rect rgb(235, 245, 255)
-    Note over User, Entra: Human identity
     User->>Entra: sign in (MSAL)
     Entra-->>User: JWT access token
     User->>API: Bearer JWT
     API->>Entra: validate token
     Note right of API: check signed-in email against ALLOWED_USERS
-    end
+```
 
-    rect rgb(245, 245, 225)
-    Note over API, Data: Machine identity — each app has its own Managed Identity
+**2. Machine identity — each app has its own Managed Identity**
+
+```mermaid
+sequenceDiagram
+    participant API as alpha-api
+    participant Worker as alpha-worker
+    participant Embed as alpha-embed-worker
+    participant Entra as Microsoft Entra ID
+    participant Data as Service Bus / Postgres / Redis
+
     API->>Entra: request AAD token (own identity)
     Entra-->>API: token
     API->>Data: authenticated call
@@ -210,32 +211,52 @@ sequenceDiagram
     Embed->>Entra: request AAD token (own identity)
     Entra-->>Embed: token
     Embed->>Data: authenticated call
-    end
+```
 
-    rect rgb(230, 250, 230)
-    Note over Worker, KV: Third-party secret — still Managed-Identity-gated
+**3. Third-party secret — still Managed-Identity-gated**
+
+```mermaid
+sequenceDiagram
+    participant Worker as alpha-worker
+    participant Entra as Microsoft Entra ID
+    participant KV as Key Vault
+
     Worker->>Entra: request AAD token (own identity)
     Entra-->>Worker: token
     Worker->>KV: authenticated request
     KV-->>Worker: Tavily API key (released only to this identity)
-    end
+```
 
-    rect rgb(255, 250, 225)
-    Note over KEDA, Data: Autoscaling also uses a real identity, not a secret
+**4. Autoscaling — also a real identity, not a secret**
+
+```mermaid
+sequenceDiagram
+    participant KEDA
+    participant Entra as Microsoft Entra ID
+    participant Data as Service Bus
+
     KEDA->>Entra: request AAD token (as alpha-worker / alpha-embed-worker)
     Entra-->>KEDA: token
     KEDA->>Data: poll queue depth
-    end
+```
 
-    rect rgb(255, 235, 235)
-    Note over API, AOAI: The one remaining static secret — not identity
+**5. The one remaining static secret — not identity**
+
+```mermaid
+sequenceDiagram
+    participant API as alpha-api
+    participant Worker as alpha-worker
+    participant Embed as alpha-embed-worker
+    participant APIM as API Management
+    participant Entra as Microsoft Entra ID
+    participant AOAI as Azure OpenAI
+
     API->>APIM: Ocp-Apim-Subscription-Key
     Worker->>APIM: Ocp-Apim-Subscription-Key
     Embed->>APIM: Ocp-Apim-Subscription-Key
     APIM->>Entra: request AAD token (own identity)
     Entra-->>APIM: token
     APIM->>AOAI: authenticated call
-    end
 ```
 
 **Two things this table deliberately does not gloss over:**
@@ -265,6 +286,69 @@ Building this table meant re-verifying every row against the actual live system 
 
 **The frontend was hiding its own real errors.** While all this infrastructure work was happening, a live user hit a genuine "Could not reach the server" error — except the backend was completely healthy the whole time (proven directly: curl succeeded, the CORS preflight succeeded, no error in any log). The real cause turned out to be `App.jsx` itself: every possible failure — an expired sign-in session, a clean `401`/`403` from a perfectly reachable server, or an actual network failure — funneled into the exact same generic message. That's a real cost, not a hypothetical one: it made a simple "please sign in again" situation look identical to a full backend outage, and real time went into checking backend health before the actual cause was found by reading the frontend's own error-handling code. Fixed by staging the error handling so each failure point reports what actually happened — verified live when the same user's next real submission succeeded immediately after signing in again.
 
+## Section F: A Checklist for Constraining Agents Specifically
+
+Everything above is about *services* proving who they are. This section is different on purpose — a reference list of the real techniques for constraining what an *agent* (the LLM-directed part of a service, not the service itself) is allowed to do, organized by layer, checked against what this project actually has and doesn't. Not a design this project has fully built — a checklist to design against, with this project's own real state marked honestly at each point.
+
+### F.1 — Isolation boundaries: process, container, and VM
+
+These answer "if an agent's tool call does something unexpected, what else can it reach?" — and they stack, each one costing more to operate than the last.
+
+- **Same process (weakest, cheapest).** The agent's tool-calling loop runs as ordinary function calls inside the same Python process as everything else that process can do. This is alpha's current shape for four of five agents' *lack* of tools, and for News's two tools that don't leave the process (the deterministic skill) — no isolation exists between the agent loop and the rest of `alpha-worker`.
+- **Separate process, same host.** A tool's real work happens in its own OS process, communicating over a narrow protocol (stdio, a local socket) rather than a shared address space. **This project already does this for exactly one tool** — News's `search_web`, via the MCP subprocess — and Stage D's fix (passing only `TAVILY_API_KEY` via `env=`, not the full environment) is what actually made that boundary meaningful rather than nominal. The general principle worth naming: a process boundary only limits *access* if the environment/credentials handed across it are also narrowed. A subprocess that inherits everything its parent has gains you crash isolation, not access isolation.
+- **Separate container.** The tool's execution moves to its own container — its own filesystem, its own (optionally minimal or read-only) image, and critically, its own identity if it's a real Azure compute resource (a separate Container App, or a Container Apps Job invoked per tool call). This is the natural next step up from a subprocess when a tool's blast radius needs to be capped harder than "no extra env vars" — e.g., a hypothetical tool that runs model-generated code would want its own container, not just its own process, since a process boundary alone doesn't stop filesystem or network access on the same host.
+- **Separate VM (strongest, most expensive).** Full hardware-level isolation — a different kernel, not just a different container runtime. Azure's Confidential VMs or a dedicated sandboxed VM pool are the real-world version of this. Reserved for the highest-risk case: a tool that executes arbitrary, untrusted, model-generated code with no fixed shape at all. Nothing in this project currently needs this tier — every tool here does one fixed, developer-written thing (search, a deterministic Python function) — but it's the honest ceiling if that ever changed.
+
+**The constraint that ties isolation to identity**: Azure Managed Identity is bound to the *compute resource* (a Container App, a VM), not to a function or a line of code. You cannot give one Python function inside `alpha-worker` "its own" Managed Identity while it shares a process with everything else `alpha-worker` does — the identity is the whole process's, or the whole container's. Wanting a genuinely narrower identity *for one specific agent or tool* is, in practice, a decision to also give it its own process or container. Isolation and identity-scoping aren't two separate items on this list — the second one requires the first.
+
+### F.2 — Identity and resource-access scoping, once isolation exists
+
+If a tool did get its own container (or Container Apps Job) with its own system-assigned Managed Identity:
+
+- Grant it the narrowest RBAC role that specific tool needs — not a copy of the parent worker's role set. This project's own Postgres/Service Bus/Redis grants (Stages B–C) are the existing model: `alpha-embed-worker` can only `INSERT` into `researchreport`, nothing else, because that's genuinely all it needs.
+- **A real gap worth naming, found while writing this chapter**: right now, *any* tool added to *any* agent's registry inherits `alpha-worker`'s full identity — read/write on `TickerJob`, `TokenUsage`, `TickerProfile`, all of it — regardless of what that one tool conceptually needs. The tool registry limits *which functions the LLM can call*; it does not limit *what those functions, once called, are permitted to touch* at the database or resource level. A tool that only needs to read `researchreport` for semantic search would still be running under a role that can write anywhere `alpha-worker` can write, simply because it's sharing that process's one identity and one database role. Closing this gap for real would mean either a separate least-privilege database role for agent-callable tools specifically (distinct from the worker's own operational role) or, more robustly, running that tool in its own process/container with its own narrower Managed Identity per F.1.
+- Prefer a separate Key Vault secret (or a separate access policy on a shared one) per agent/tool that calls the same third-party service, rather than one shared credential — so a compromised tool's credential doesn't imply access on every other tool's behalf. This project has only one third-party credential (Tavily) and one caller (News), so this hasn't been tested at scale here, but it's the right default the moment a second third-party tool shows up.
+
+### F.3 — Prompt-level constraints
+
+- A narrow, specific system prompt is the cheapest and weakest control on this whole list — it shapes what the model *tries* to do, not what it's *able* to do. News's system prompt ("search the web... assess whether anything found is a genuine cause for concern") is deliberately scoped to exactly its two tools' purpose, not a generic "you are a helpful research assistant."
+- Treat prompt wording as a hint, never an enforcement boundary. Everything else on this list exists precisely because a well-worded prompt doesn't prevent a model from *attempting* something out of scope — it just makes the attempt less likely. `agent_harness.py`'s `_call_tool` is what actually stops it (F.4), not `SYSTEM_PROMPT`'s wording.
+
+### F.4 — Tool-registry constraints (the one real enforcement point this project already has)
+
+- Give each agent its *own* registry, not a shared one all agents can call from. Confirmed by reading the code, not assumed: `news_agent.py`'s `TOOL_REGISTRY` contains exactly `search_web` plus discovered skills — nothing from any other agent is reachable, because it's simply never in that dict.
+- Reject unknown tool names at the dispatch point, not just by omitting them from the schema sent to the model. `agent_harness.py`'s `_call_tool` checks `function_name not in tool_registry` and returns an error *result*, never an actual invocation — so even a hallucinated or deliberately out-of-scope tool name from the model can't reach real code.
+- Where there's no genuine choice to make, give the agent *zero* tools rather than a small number. Fundamentals, Technical, Risk, and Synthesizer all fetch or receive their data in plain Python before the model ever runs, and call the model with `tools=[]` — the strongest possible tool constraint is not having any tool-calling surface at all.
+
+### F.5 — Execution and cost constraints
+
+- Cap the number of tool-calling turns a single agent run can take. `agent_harness.py`'s `DEFAULT_MAX_TURNS = 5` is exactly this — a control on *how much damage a misbehaving-but-in-scope agent can do in one run*, distinct from F.4's control on *what it's allowed to do at all*. A capability boundary and a blast-radius boundary are two different things and both are needed.
+- Track and cap real cost per run, not just turns. This project already logs real token/cost totals per job (`TokenUsage`, Phase 4) — the natural next step, not yet built, is an explicit per-job or per-agent cost ceiling that aborts a run rather than only recording what it cost after the fact.
+- Timeout the whole agent run, not just individual tool calls — relevant here specifically because of the real `MessageLockLostError` incident earlier in this chapter, where a slow multi-tool-call run outran the Service Bus message lock. A turn cap bounds *iterations*; a wall-clock timeout bounds *time*, and a slow individual step (like the per-call Key Vault fetch that caused that incident) can blow the second without ever hitting the first.
+
+### F.6 — Data and content constraints
+
+- Treat tool results from untrusted sources as data, never as instructions. News's `search_web` results come from the open web — genuinely untrusted content that lands back in the model's own context. Nothing in this project currently re-parses or sanitizes search results before they're fed back to the model; the real defense in place today is indirect (F.4's narrow registry means even a successfully-injected instruction has nowhere to escalate to, since there's no broader tool available to misuse) rather than a direct content filter. Worth naming as a real, not-yet-hardened gap, not a solved problem.
+- Validate a tool's or an agent's output against a real schema before anything downstream trusts it, rather than trusting free-form model text. This project's typed `{"status": ..., "answer"/"error": ...}` return shape from every agent run (`agent_harness.py`) is a mild version of this — a caller can always tell a real answer from a give-up. A stricter version (rejecting a malformed or suspicious result outright, not just distinguishing success from failure) doesn't exist here yet.
+- Prefer indirection over raw data in context for large or sensitive results — store the real payload elsewhere and hand the model a reference or a summary, rather than the whole thing. (`buynobuy`'s `store_tool_data`/`pop_tool_data` pair in `agents/utils.py` does exactly this — worth citing as a real pattern from that reference project, even though none of its agents actually run a tool-calling loop that would need it today.)
+
+### F.7 — Observability and audit
+
+- Log every tool call, with its real arguments and result, not just success/failure. `agent_harness.py` already does this (`print(f"-> calling {function_name}({function_args})")`) — every tool invocation this whole project has made has been visible in the live logs used throughout this book to debug real incidents.
+- Attribute cost and behavior to the specific agent and tool that caused it, not just the job as a whole — this project's `TokenUsage` table already does this per ticker; extending it to per-agent, per-tool-call granularity is the natural next step for a system with more than one tool-calling agent.
+
+### F.8 — Human oversight for genuinely risky actions
+
+- Nothing in this project currently takes an irreversible or high-consequence action on an agent's decision alone — every tool here is read-only (search, fetch) or writes to this app's own database in a way that's naturally correctable (a re-run overwrites a bad result). Human-in-the-loop approval gates are a real, standard technique for the case this project doesn't have yet: a tool that would place a trade, send an email, or otherwise act in the world where a bad decision can't just be re-run.
+
+### Which of alpha's own agents is the real candidate for a genuine loop next?
+
+Checking `buynobuy` for another loop-based agent to bring forward came back empty — worth being direct about that rather than manufacturing a parallel that isn't there. The more useful question, given this project's own shape, is which of *alpha's* four synthesis-only agents would most legitimately earn a real tool-calling loop next.
+
+**Synthesizer is the strongest candidate**, and not hypothetically — this project already has a working capability it has never actually used *by an agent*: semantic memory (`/search`, Phase 5's pgvector-backed `ResearchReport` table) exists today purely as a human-facing endpoint. Giving Synthesizer a tool to query it directly — "has this app said something relevant about this ticker before, and does that change today's framing?" — is a genuine judgment call, the same shape of real tool-choice News already has, using a resource this project has already built rather than a new one. **Risk is the secondary candidate**: today it receives fixed, pre-computed summaries from the other three agents and makes one synthesis call; a real loop would let it pull one other agent's *raw* underlying data, not just its narrative summary, specifically when signals conflict — genuine judgment about when the pre-digested version isn't enough.
+
+Either extension would immediately raise F.2's named gap: a "search past reports" tool only needs read-only access to `researchreport`, but as an in-process function inside `alpha-worker`, it would run under the same identity that can write to every other table that process can reach. That's not a reason not to build it — it's the concrete, real case (not a hypothetical one) where this project would have to decide whether "good enough" is the existing shared-identity model, or whether it's time to give that one tool its own process and its own narrower database role.
+
 ## Where This Stands
 
-All five stages of Phase 8 are complete. Every one of `alpha-api`, `alpha-worker`, and `alpha-embed-worker`'s connections — to Entra ID, Service Bus, Postgres, Redis, and the one third-party secret this app depends on — run on real Azure identity or Key Vault instead of a long-lived plaintext credential, access-key/password authentication is switched off entirely at the resource level for all three data stores, and the trust boundary is written down honestly, limitations included. Two items remain deliberately open, tracked rather than hidden: the Redis OSS Cluster routing gap from Stage C (a plain client against a sharded cache), and the two named limitations above (no network isolation, one remaining static APIM key) — both real, both known, neither silently left for someone to discover later.
+All five stages of Phase 8 are complete. Every one of `alpha-api`, `alpha-worker`, and `alpha-embed-worker`'s connections — to Entra ID, Service Bus, Postgres, Redis, and the one third-party secret this app depends on — run on real Azure identity or Key Vault instead of a long-lived plaintext credential, access-key/password authentication is switched off entirely at the resource level for all three data stores, and the trust boundary is written down honestly, limitations included. Section F adds a checklist for the layer this project's own trust boundary doesn't yet cover in depth — constraining agents specifically, not just the services hosting them — checked point-by-point against what's actually built rather than presented as already solved. Items remain deliberately open, tracked rather than hidden: the Redis OSS Cluster routing gap from Stage C, the two named service-level limitations (no network isolation, one remaining static APIM key), and Section F.2's/F.6's named agent-level gaps (shared identity beyond what a specific tool needs; no direct defense against untrusted tool-result content) — all real, all known, none silently left for someone to discover later.
