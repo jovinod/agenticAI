@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMsal, AuthenticatedTemplate, UnauthenticatedTemplate } from '@azure/msal-react'
 import { InteractionRequiredAuthError } from '@azure/msal-browser'
 import { loginRequest } from './authConfig.js'
+import ReportView from './ReportView.jsx'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -209,10 +210,7 @@ function ResearchApp() {
 
       {status === 'done' && report && (
         <div>
-          <h2>Report</h2>
-          <ul>
-            {report.summary.map((line) => <li key={line}>{line}</li>)}
-          </ul>
+          <ReportView report={report} />
           <button onClick={handleReset}>New search</button>
         </div>
       )}

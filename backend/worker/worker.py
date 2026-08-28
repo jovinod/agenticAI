@@ -224,7 +224,25 @@ async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, ch
         await embed_sender.send_messages(ServiceBusMessage(embed_message))
     print(f"{ticker} done.")
 
-    result = {"tickers": [ticker], "summary": [summary_line]}
+    # Structured decision data for the report view, keyed by ticker since one
+    # job can fan out into several -- kept alongside the existing flat
+    # "summary" text rather than replacing it, so nothing that already reads
+    # "summary" breaks.
+    decision_data = {
+        "recommendation": graph_result.get("recommendation", ""),
+        "overall_score": graph_result.get("overall_score"),
+        "hard_stops_triggered": graph_result.get("hard_stops_triggered", []),
+        "intrinsic_value": graph_result.get("intrinsic_value", {}),
+        "devil_advocate": graph_result.get("devil_advocate_data", {}),
+        "final_report": final_report,
+        "price_line": price_line,
+    }
+
+    result = {
+        "tickers": [ticker],
+        "summary": [summary_line],
+        "decisions": {ticker: decision_data},
+    }
     result_json = json.dumps(result)
 
     cache_key = f"research:{market}:{ticker}:{date.today().isoformat()}"

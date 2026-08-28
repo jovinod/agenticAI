@@ -7,7 +7,11 @@ itself. Every node below just calls into one of agents/*.py, each of which
 goes through the same shared agent_harness.py.
 
 News, Fundamentals, and Technical run in parallel (none depend on each
-other's output); Risk waits for all three; Synthesizer runs last.
+other's output); Risk waits for all three; Devil's Advocate runs after Risk
+(it needs Risk's summary to build counter-evidence against); Decision runs
+last, replacing Synthesizer -- it owns both the BUY/HOLD/SELL verdict and
+the final narrative, using Devil's Advocate's counter-thesis as one more
+input alongside the other four agents' summaries.
 
 Each node also writes its own result to short-term memory (memory/short_term.py)
 as soon as it finishes -- so a still-running job has real partial progress to
@@ -17,7 +21,7 @@ import operator
 from typing import Annotated, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import RetryPolicy
-from agents import fundamentals_agent, technical_agent, news_agent, risk_agent, synthesizer_agent
+from agents import fundamentals_agent, technical_agent, news_agent, risk_agent, devil_agent, decision_agent
 from memory.short_term import write_progress
 
 
@@ -31,6 +35,12 @@ class ResearchState(TypedDict):
     news_summary: str
     risk_summary: str
     risk_flags: list
+    devil_advocate_summary: str
+    devil_advocate_data: dict
+    recommendation: str
+    overall_score: float | None
+    hard_stops_triggered: list
+    intrinsic_value: dict
     final_report: str
     # Fundamentals/Technical/News run in PARALLEL and each contributes its own
     # usage -- if this were a single dict, whichever node finished last would
@@ -137,21 +147,53 @@ async def risk_node(state: ResearchState) -> dict:
     }
 
 
-async def synthesizer_node(state: ResearchState) -> dict:
+async def devil_advocate_node(state: ResearchState) -> dict:
     try:
-        result = await synthesizer_agent.run(
+        result = await devil_agent.run(
             state["ticker"],
+            state["market"],
             state.get("fundamentals_summary", ""),
             state.get("technical_summary", ""),
             state.get("news_summary", ""),
             state.get("risk_summary", ""),
         )
     except Exception as exc:
-        return await _degraded_result(state["job_id"], state["ticker"], "synthesizer", "final_report", exc)
+        return await _degraded_result(
+            state["job_id"], state["ticker"], "devil_advocate", "devil_advocate_summary", exc, {"devil_advocate_data": {}}
+        )
+    summary = result.get("answer", "Devil's Advocate assessment unavailable.")
+    await write_progress(state["job_id"], state["ticker"], "devil_advocate", summary)
+    return {
+        "devil_advocate_summary": summary,
+        "devil_advocate_data": result,
+        "usage_log": [result.get("usage", {})],
+    }
+
+
+async def decision_node(state: ResearchState) -> dict:
+    try:
+        result = await decision_agent.run(
+            state["ticker"],
+            state["market"],
+            state.get("fundamentals_summary", ""),
+            state.get("technical_summary", ""),
+            state.get("news_summary", ""),
+            state.get("risk_summary", ""),
+            state.get("devil_advocate_summary", ""),
+        )
+    except Exception as exc:
+        return await _degraded_result(
+            state["job_id"], state["ticker"], "decision", "final_report", exc,
+            {"recommendation": "HOLD", "overall_score": None, "hard_stops_triggered": [], "intrinsic_value": {}},
+        )
     summary = result.get("answer", "Report unavailable.")
-    await write_progress(state["job_id"], state["ticker"], "synthesizer", summary)
+    await write_progress(state["job_id"], state["ticker"], "decision", summary)
     return {
         "final_report": summary,
+        "recommendation": result.get("recommendation", "HOLD"),
+        "overall_score": result.get("overall_score"),
+        "hard_stops_triggered": result.get("hard_stops_triggered", []),
+        "intrinsic_value": result.get("intrinsic_value", {}),
         "usage_log": [result.get("usage", {})],
     }
 
@@ -173,7 +215,8 @@ def build_graph(checkpointer=None):
     builder.add_node("technical", technical_node, retry_policy=RetryPolicy())
     builder.add_node("news", news_node, retry_policy=RetryPolicy())
     builder.add_node("risk", risk_node, retry_policy=RetryPolicy())
-    builder.add_node("synthesizer", synthesizer_node, retry_policy=RetryPolicy())
+    builder.add_node("devil_advocate", devil_advocate_node, retry_policy=RetryPolicy())
+    builder.add_node("decision", decision_node, retry_policy=RetryPolicy())
 
     # Fan-out: all three fire from START in parallel, none waits on the others.
     builder.add_edge(START, "fundamentals")
@@ -185,8 +228,12 @@ def build_graph(checkpointer=None):
     builder.add_edge("technical", "risk")
     builder.add_edge("news", "risk")
 
-    builder.add_edge("risk", "synthesizer")
-    builder.add_edge("synthesizer", END)
+    # Devil's Advocate needs Risk's summary to build counter-evidence against,
+    # so it runs after Risk rather than in parallel with it. Decision runs
+    # last, using Devil's Advocate's counter-thesis as one more input.
+    builder.add_edge("risk", "devil_advocate")
+    builder.add_edge("devil_advocate", "decision")
+    builder.add_edge("decision", END)
 
     return builder.compile(checkpointer=checkpointer)
 
@@ -203,6 +250,12 @@ async def run_research(job_id: str, ticker: str, market: str, checkpointer=None)
         "news_summary": "",
         "risk_summary": "",
         "risk_flags": [],
+        "devil_advocate_summary": "",
+        "devil_advocate_data": {},
+        "recommendation": "",
+        "overall_score": None,
+        "hard_stops_triggered": [],
+        "intrinsic_value": {},
         "final_report": "",
         "usage_log": [],
     }
@@ -238,7 +291,11 @@ async def run_research(job_id: str, ticker: str, market: str, checkpointer=None)
 if __name__ == "__main__":
     import asyncio
     final = asyncio.run(run_research("standalone-test-job", "AAPL", "US"))
+    print(f"Recommendation: {final['recommendation']} (score {final['overall_score']})")
     print(final["final_report"])
+    print()
+    print("Hard stops:", final["hard_stops_triggered"])
+    print("Devil's Advocate:", final["devil_advocate_summary"])
     print()
     print("Risk flags:", final["risk_flags"])
     print("Total usage:", final["total_usage"])

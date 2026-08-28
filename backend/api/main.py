@@ -185,11 +185,14 @@ async def get_research(job_id: str):
 
     tickers = []
     summary = []
+    decisions = {}
     for t in tasks:
         tickers.append(t.ticker)
-        summary.extend(json.loads(t.result)["summary"])
+        parsed = json.loads(t.result)
+        summary.extend(parsed["summary"])
+        decisions.update(parsed.get("decisions", {}))  # absent on a failed ticker's result -- not every job reaches Decision
 
-    return {"status": "done", "result": {"tickers": tickers, "summary": summary}}
+    return {"status": "done", "result": {"tickers": tickers, "summary": summary, "decisions": decisions}}
 
 
 @app.get("/search", dependencies=[Depends(require_user)])
