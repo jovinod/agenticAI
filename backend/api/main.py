@@ -17,6 +17,7 @@ from sqlmodel import create_engine, Session, select
 from models import TickerJob, ResearchReport
 from llm.embeddings_client import embed
 from auth import require_user
+from pii_scrub import scrub_pii
 
 # Phase 8, Stage B -- Managed Identity instead of a password secret, when
 # running in Azure. DATABASE_HOST is only ever set there: the local Docker
@@ -158,7 +159,7 @@ async def _read_progress(job_id: str, ticker: str) -> dict:
     TickerJob is duplicated in both models.py files), and only the worker
     ever WRITES progress, so only the read side needs to exist here."""
     progress = {}
-    for agent_name in ("fundamentals", "technical", "news", "risk", "synthesizer"):
+    for agent_name in ("fundamentals", "technical", "news", "risk", "devil_advocate", "decision"):
         value = await app.state.redis.get(f"progress:{job_id}:{ticker}:{agent_name}")
         if value is not None:
             progress[agent_name] = value
@@ -202,6 +203,7 @@ async def search_reports(q: str, limit: int = 5):
     Genuinely decoupled from the agent graph: this doesn't feed back into
     any agent's context, it's a standalone way to ask "what have we said
     that's relevant to this," across every ticker researched so far."""
+    q = scrub_pii(q)  # Phase 9 (Guardrails) -- the one free-text input in this app
     query_vector = await embed(q)
     with Session(engine) as session:
         reports = session.exec(

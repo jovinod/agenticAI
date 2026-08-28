@@ -11,6 +11,7 @@ import os
 import pathlib
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from tools.prompt_shields import scan_documents
 
 _SERVER_DIR = pathlib.Path(__file__).parent.parent / "mcp_server"
 
@@ -47,4 +48,16 @@ async def search_via_mcp(query: str, max_results: int = 5) -> list[dict]:
             result = await session.call_tool(
                 "search", {"query": query, "max_results": max_results}
             )
-            return [block.text for block in result.content if hasattr(block, "text")]
+            texts = [block.text for block in result.content if hasattr(block, "text")]
+
+    # Phase 9 (Guardrails) -- the one place untrusted third-party content
+    # (whatever Tavily found on the open web) enters this project. Azure
+    # OpenAI's own built-in jailbreak classifier only scans the user's own
+    # message, confirmed live NOT to scan tool-role content -- this is the
+    # dedicated check for content that could contain hidden instructions
+    # aimed at hijacking the agent reading it, not at us directly.
+    is_safe = await scan_documents(texts)
+    return [
+        text if safe else "[Result removed: flagged as a potential prompt injection attempt]"
+        for text, safe in zip(texts, is_safe)
+    ]
