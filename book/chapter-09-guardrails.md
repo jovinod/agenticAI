@@ -126,6 +126,39 @@ Both ran the actual deployed code, in the actual production container, against t
 | `backend/api/pii_scrub.py` (new) | `scrub_pii()` — regex redaction of email and phone-number shapes. |
 | `backend/api/main.py` | `q = scrub_pii(q)` added to `/search`; also fixes a stale `"synthesizer"` reference in `_read_progress` left over from Chapter 5's Decision/Devil's Advocate swap. |
 
+## The Flow So Far
+
+Three separate paths, three different kinds of check — worth seeing together, since it's easy to read about each one in isolation and miss that they don't all use the same mechanism:
+
+```mermaid
+flowchart TD
+    subgraph Direct["Direct injection: a user's own message"]
+        UserMsg["The signed-in user's own text,<br/>as part of a request"] --> AOAI["Azure OpenAI's built-in filter<br/>(out of the box, zero config,<br/>no code in this repo)"]
+        AOAI -->|"jailbreak: detected"| Block["HTTP 400 -- blocked before<br/>any completion happens"]
+        AOAI -->|"clean"| ModelA["Model call proceeds"]
+    end
+
+    subgraph Indirect["Indirect injection: content a tool hands back"]
+        Search["News / Devil's Advocate call<br/>search_web(query)"] --> Tavily["Tavily -- real open-web results"]
+        Tavily --> Shields["scan_documents()<br/>Azure AI Content Safety Prompt Shields<br/>(real API, wired by us -- Phase 9)"]
+        Shields -->|"attackDetected: true"| Redact["Result replaced with a<br/>placeholder string"]
+        Shields -->|"attackDetected: false"| ToolResult["Real result kept as-is"]
+        Redact --> ModelB
+        ToolResult --> ModelB["Fed into the model as a tool-role message --<br/>confirmed live NOT covered by Azure OpenAI's<br/>own filter, which only scans user-role turns"]
+    end
+
+    subgraph FreeText["The one free-text user input"]
+        SearchQ["GET /search?q=..."] --> Scrub["scrub_pii()<br/>our own regex -- email + phone<br/>(Phase 9, not an Azure service)"]
+        Scrub --> Embed["embed() + pgvector similarity search"]
+    end
+```
+
+**None of the three boxes doing the actual checking are the same kind of thing.** The top path is entirely Azure OpenAI's own behavior — no code in this repository, on by default, not something Phase 9 built. The middle path is a real Azure service this phase provisioned and wired in deliberately, because the top path's coverage stops exactly where it does. The bottom path is genuinely ours — plain Python regex, no external call at all — because the problem it solves (two well-known text shapes) doesn't need a classifier. Three checks, three different owners, chosen deliberately rather than defaulting to one tool for everything.
+
+## Azure Components Used This Chapter
+
+One new resource: **Azure AI Content Safety** (`alpha-research-contentsafety`), Free tier (F0), providing the Prompt Shields `text:shieldPrompt` endpoint. Authenticated via `alpha-worker`'s existing Managed Identity (Chapter 8, Stage B/C's pattern extended to a new resource, not a new mechanism) plus a "Cognitive Services User" role grant and the custom-subdomain fix described above. No new compute, no new network path from the browser — this resource is only ever called from inside `alpha-worker`, never exposed publicly.
+
 ## Where This Stands
 
 Indirect prompt injection via search results now has a real, live-verified defense, closing a gap Chapter 8 named explicitly rather than solved. Basic accidental-PII exposure through the one free-text input is scrubbed before it's embedded or stored. Both are deliberately scoped narrow — Prompt Shields only wraps the one tool that touches untrusted external content, and PII scrubbing only covers two common accidental shapes, not a general classifier — matching this project's standing principle of putting a real, purpose-built tool exactly where a genuine risk exists, and nowhere else.
