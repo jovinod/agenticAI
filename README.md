@@ -1,93 +1,110 @@
 # Alpha — Agentic Stock Research System
 
 A distributed multi-agent stock research system: enter one or more tickers in a
-React SPA, and a pipeline of agents (news, fundamentals, technical, risk) researches
-them and returns a report. Built incrementally, deployed to Azure layer by layer.
+React SPA, and a pipeline of agents (fundamentals, technical, news, risk, a
+Devil's Advocate, and a final Decision agent) researches them and returns a
+real BUY/HOLD/SELL report with intrinsic-value estimates and a bear-case
+counter-thesis. Built incrementally, deployed to Azure layer by layer.
 
-Being built with guidance from the `tutor/` skill — see `tutor/references/phases.md`
+Built with guidance from the `tutor/` skill — see `tutor/references/phases.md`
 for the full roadmap and `book/` for a curated, chapter-per-phase account of how it
-was built (concept explanations now live there, not in a separate glossary file).
+was built (concept explanations live there, not in a separate glossary file).
 
 ## Status
 
-**Phase 1 — Frontend shell: complete.** **Phase 2 — Backend skeleton: complete.** **Phase 3 — MCP tools + real data: complete.** **Phase 4 — First agent (Azure AI Foundry + tool-calling + token/cost logging): complete.** **Phase 5 — Multi-agent + Skills + real three-tier memory: complete.** Five-agent LangGraph pipeline (Fundamentals/Technical/News/Risk/Synthesizer), genuinely concurrent execution, Azure API Management fronting Foundry, real KEDA autoscaling, Skills genuinely discoverable, and all three memory tiers (short-term/Redis, profile/Postgres, semantic/pgvector via a standalone `/search` feature) — all deployed and verified live. **Phase 6 — Checkpointing & durable workflows: complete.** LangGraph's built-in Postgres checkpointing wired into the research graph, verified against a genuine `az containerapp revision restart` mid-job on the live deployment, not a simulated crash. **Phase 7 — Resilience: complete.** `RetryPolicy` for transient failures and in-function graceful degradation for persistent ones on all five agent nodes, verified live via a genuine corrupted-secret failure injection (not simulated) that surfaced and fixed a real bug in `worker.py`'s post-processing. **Phase 8 — Auth & trust boundaries: complete, all 5 stages.** Entra ID sign-in on the frontend, real backend token validation plus an authorization allow-list, deployed and verified live -- both directions of the allow-list proven with one real token. Stages B–D (Managed Identity for Service Bus, Postgres, and Redis; Key Vault for the Tavily key): `alpha-api`/`alpha-worker`/`alpha-embed-worker` now authenticate to Service Bus, Postgres, and Redis via Managed Identity instead of SAS connection strings and password secrets, with access-key auth disabled entirely at the resource level for all three; the one remaining third-party secret (Tavily) lives in a real Key Vault, Managed-Identity-gated. Stage E documents the trust boundary honestly: identity-based, not network-based (every resource still has public network access enabled, no VNet/private endpoints anywhere), with one named remaining static secret (the shared APIM subscription key). Numerous real production incidents were found and fixed at the root cause along the way -- a malformed-message crash-loop gap in both workers; a Postgres `INSERT ... RETURNING` permission gap caught live on a real user's research job; a "blocker" that turned out to be a wrong-database mistake rather than an Azure bug (`pgaadauth_create_principal` only exists in the `postgres` maintenance database); a genuine secret-leakage incident (two services' Docker images had `.env.local` baked directly in) that triggered rotating the Postgres admin password, deleting unused Service Bus SAS keys, regenerating the shared APIM key, and rotating the Tavily key; a `MessageLockLostError` caused by the Key Vault fix's own per-call latency; and, while writing Stage E's trust-boundary table, a self-inflicted KEDA autoscaler regression (scale rules still pointed at SAS secrets deleted during Stage B cleanup, fixed with Managed Identity scale rules after three live-discovered corrections) plus a frontend bug that masked every real error -- expired session, clean 401/403, or genuine network failure -- behind one generic message. A separate, pre-existing Redis OSS-cluster routing gap was found and deliberately deferred as its own tracked item. Verified end-to-end on many real user-submitted jobs throughout, watched live across all services.
+**Phases 1–7: complete.** Frontend shell, backend skeleton (FastAPI + Service Bus + Postgres), MCP tools + real `yfinance` data, the first Azure AI Foundry agent with token/cost logging, a real multi-agent LangGraph pipeline with genuine three-tier memory (Redis/pgvector/Postgres), LangGraph checkpointing proven against a real mid-job crash, and resilience (`RetryPolicy` + graceful degradation) proven against a real failure injection — see `book/chapter-01` through `chapter-07` for the full account of each, including every real incident found along the way.
+
+**Phase 8 — Auth & trust boundaries: complete, all 5 stages.** Entra ID sign-in, backend token validation plus an authorization allow-list, Managed Identity for Service Bus/Postgres/Redis (access-key auth disabled entirely at the resource level), Key Vault for the one remaining third-party secret (Tavily), and an honest trust-boundary writeup (identity-based, not network-based — no VNet anywhere). Real incidents found and fixed along the way include a genuine secret-leakage incident (`.env.local` baked into two Docker images), a `MessageLockLostError` caused by a Key Vault round-trip's own latency, and a self-inflicted KEDA autoscaler regression. See `book/chapter-08-auth.md`.
+
+**A sixth and seventh agent, built for real.** The original five-agent graph (Fundamentals/Technical/News/Risk/Synthesizer) was rebuilt: Synthesizer was replaced entirely by a real **Decision** agent (a genuine tool-calling loop computing intrinsic value and checking deterministic hard-stop rules, market-agnostic — proven on both a September-fiscal-year US stock and a March-fiscal-year Indian one) and a new **Devil's Advocate** agent (real adversarial bear-case research, read-only by design). See `book/chapter-05-multi-agent.md`'s "Built For Real" section.
+
+**Phase 9 — Guardrails: complete.** Azure AI Content Safety's Prompt Shields wired into the one place untrusted third-party content enters the system (`tools/web_search.py`), catching indirect prompt injection in search results — verified live against a real crafted injection attempt and confirmed not to false-positive on genuine search content. Basic PII scrubbing on `/search`'s free-text input. Real incidents: a Content Safety custom-subdomain requirement for AAD auth, and two real deploy gotchas (`az acr build` packaging the git-committed tree instead of the working directory, and `:latest` not forcing a new Container Apps revision) that are now standing practice for every deploy in this project. See `book/chapter-09-guardrails.md`.
+
+**Phase 10 — Observability: complete.** Azure OpenAI diagnostic logging (tokens/cost/timing, no content) plus real OpenTelemetry tracing through `alpha-api` and `alpha-worker`, with `job_id` as the correlation key across the resulting traces (Service Bus doesn't propagate trace context across the queue) — verified end to end on real jobs. The actual payoff, not tracing for its own sake: the tracing itself surfaced a real blocking-call bug (three `yfinance` calls made synchronously from async agent code, silently serializing the graph's "parallel" branches) — fixed with `asyncio.to_thread()`, measured **~58% reduction** in per-ticker processing time on a real before/after job. See `book/chapter-10-observability.md`.
+
+**Phase 11 — Scaling validation: complete.** `alpha-worker`'s real queue-depth autoscaling proven with a fully-captured live cycle (1 → 8 replicas under an 8-ticker burst → back to 1 after cooldown). The MCP search server graduated from Option A (a subprocess spawned per call) to Option B: its own Container App (`alpha-mcp-search`, internal ingress only, its own Managed Identity and Key Vault access), reached over HTTPS. Three real incidents found deploying it, most notably a genuine Azure Container Apps behavior: internal ingress force-redirects HTTP to HTTPS, and `httpx`'s default redirect handling silently downgrades a POST to a GET on that redirect — a generic gotcha for any POST-based service-to-service call over Container Apps' internal ingress, not specific to MCP. See `book/chapter-11-scaling.md`.
+
+**Phase 12 — Polish & final wiring: in progress.** A History tab (filter past reports by ticker/date, reusing the existing `TickerJob` table — no new storage), an explicit per-ticker failure state in the frontend (replacing fragile string-sniffing of raw error text), and this README brought fully current. The KEDA queue-depth threshold was reverted from a deliberately aggressive testing value (`messageCount=1`) to a more production-reasonable `5`, exactly as flagged as a plan in earlier revisions of this README — caught live along the way: `az containerapp update`'s default API version silently drops the `identity` field on a custom scale rule, requiring a direct ARM REST PATCH against a newer API version to fix, verified by re-reading the resource rather than trusting the update command's own success.
 
 ## Architecture
 
 ```
-Web page (React SPA, Azure Static Web Apps)        ← ✅ live
-   │ (Entra ID sign-in + Bearer token)               ← ✅ live (Phase 8, Stage A) — MSAL sign-in, backend token validation + authorization allow-list
+Web page (React SPA, Azure Static Web Apps)              ← ✅ live
+   │ (Entra ID sign-in + Bearer token)                     ← ✅ live — MSAL sign-in, backend token validation + allow-list
    ▼
-FastAPI (Container App, autoscale on HTTP)          ← ✅ live (alpha-api, external ingress)
-   │  writes job → Azure Service Bus queue (Managed Identity, not a SAS key — Phase 8, Stage B)
+FastAPI (Container App, autoscale on HTTP)                ← ✅ live (alpha-api, external ingress)
+   │  writes job → Azure Service Bus queue (Managed Identity)
    ▼
-Worker (Container App, autoscale on queue depth)    ← ✅ live (alpha-worker, no ingress, min 1 / max 10 replicas) — real KEDA azure-servicebus scale rule, ~1 replica per queued message (messageCount=1, deliberately aggressive — will be reverted closer to 5 near project completion), verified via `az containerapp show` (not just the update command's success)
+Worker (Container App, autoscale on queue depth)          ← ✅ live (alpha-worker, min 1 / max 10 replicas, ~1 replica per 5 queued msgs)
    │
-   ├─▶ Single agent (LangGraph multi-agent flow is Phase 5) ← ✅ live — real bounded async tool-calling loop, deterministic checks run alongside it, not replaced by it
-   │      ├─ calls Azure AI Foundry (gpt-5-mini) via Azure API Management ← ✅ live — APIM (Consumption tier) fronts Foundry, authenticates via its own managed identity (worker never holds the raw Foundry key); tracing still Phase 8
-   │      ├─ calls MCP tools (stock data, news)           ← both ✅ live — stock data (direct call, yfinance) and Tavily search (real MCP server), model decides when search is worth it
-   │      ├─ loads Skills (reusable capability modules)   ← flag_risk_factors ✅ live (deterministic); assess_news_sentiment ✅ live — genuine LLM-discoverable Skill, model discovers + chooses to apply it
-   │      └─ reads/writes Redis + Postgres                ← both ✅ live (Redis: per-ticker result cache; Postgres: job status + token/cost log; agent memory proper is still Phase 5)
+   ├─▶ 6-agent LangGraph pipeline                          ← ✅ live
+   │      Fundamentals/Technical/News (parallel) → Risk → Devil's Advocate → Decision
+   │      ├─ calls Azure AI Foundry (gpt-5-mini) via Azure API Management
+   │      ├─ calls MCP tools — stock data (direct, yfinance) and web search
+   │      │    (own Container App, alpha-mcp-search, HTTPS, independently scaled)
+   │      ├─ Prompt Shields scans every search result for indirect injection
+   │      ├─ loads Skills (flag_risk_factors deterministic; assess_news_sentiment LLM-discoverable)
+   │      └─ reads/writes Redis + Postgres (cache, job status, token/cost, checkpoints, pgvector)
    │
-   └─▶ App Insights / OpenTelemetry                 ← not built yet (Phase 10)
+   └─▶ Application Insights / OpenTelemetry                ← ✅ live — per-agent duration/tokens, job_id-correlated traces
 ```
 
 This first diagram is the conceptual/application view (matches `phases.md`'s target). Below is a
 second, literal view — actual Azure resource names and how they really connect, updated every
-phase as real infrastructure gets added. This is the one to check if you want to know "what's
-actually deployed right now," rather than "what's the app logically made of."
+phase as real infrastructure gets added (also maintained, with change history, as "The Architecture
+So Far" in `book/chapter-11-scaling.md` and earlier chapters).
 
 ## Azure Deployment Topology (real resource names — updated every phase)
 
 ```mermaid
-flowchart TD
+flowchart TB
     User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    Entra["Microsoft Entra ID<br/>(sign-in + allow-list)"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
 
-    subgraph SWA["Static Web App: alpha  (East Asia)"]
-        Frontend["React SPA (built files)"]
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per 5 queued msgs)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
     end
 
-    subgraph RG["Resource Group: alpha-rg  (Central India unless noted)"]
-        subgraph ENV["Container Apps Environment: alpha-env"]
-            API["Container App: alpha-api\n(external ingress, port 8000)"]
-            subgraph WorkerGroup["Container App: alpha-worker\n(no ingress) — KEDA-scaled: 1-10 replicas,\n1 replica per queued msg"]
-                direction LR
-                W1["replica"]
-                W2["replica"]
-                Wdots["···\nup to 10"]
-            end
-            EmbedWorker["Container App: alpha-embed-worker\n(no ingress) — KEDA-scaled: 0-3 replicas,\n1 replica per 5 queued msgs — separate from\nalpha-worker so a slow/failing embedding call\nnever blocks the research pipeline"]
-        end
-        ACR["Container Registry: alpharesearchacr\n(images pulled via Managed Identity)"]
-        SB["Service Bus Namespace: alpharesearchsb\nqueues: research-jobs, embedding-jobs"]
-        PG[("Postgres Flexible Server:\nalpha-research-pg\ndb: alpha — tickerjob, tokenusage,\ntickerprofile, researchreport (pgvector),\ncheckpoints (LangGraph)")]
-        Redis[("Managed Redis:\nalpha-research-cache\nport 10000, TLS, key auth")]
-        LAW["Log Analytics workspace:\nworkspace-alphargK2N9\n(auto-created by alpha-env)"]
-        APIM["API Management: alpha-research-apim\n(Consumption tier, managed identity)"]
-        OpenAI["Azure OpenAI: alpha-research-openai (South India)\ndeployments: gpt-5-mini, text-embedding-3-small"]
-    end
+    MCPSearch["Container App: alpha-mcp-search<br/>internal ingress only<br/>KEDA-scaled: 0-5 replicas"]
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas"]
 
-    User -->|"HTTPS + Entra ID sign-in"| Frontend
-    Frontend -->|"HTTPS + Bearer JWT (VITE_API_URL, baked in at build)"| API
-    API -->|"send — managed identity"| SB
-    SB -->|"listen — managed identity, one msg per replica"| WorkerGroup
-    SB -->|"listen — managed identity, embedding-jobs"| EmbedWorker
-    API -->|"read/write — managed identity"| PG
-    WorkerGroup -->|"read/write — managed identity"| PG
-    WorkerGroup -->|"checkpoint check + write per<br/>super-step (thread_id = job_id:ticker)"| PG
-    EmbedWorker -->|"write — vector embedding\nmanaged identity"| PG
-    API -->|"cache check (read) — managed identity"| Redis
-    WorkerGroup -->|"cache write — managed identity"| Redis
-    WorkerGroup -->|"tool-calling + token/cost logging\nOcp-Apim-Subscription-Key"| APIM
-    WorkerGroup -->|"publish report text\n(managed identity), embedding-jobs"| SB
-    EmbedWorker -->|"embed report text\nOcp-Apim-Subscription-Key"| APIM
-    API -->|"embed search query\nOcp-Apim-Subscription-Key"| APIM
-    APIM -->|"managed identity (AAD token)\nno stored key"| OpenAI
-    WorkerGroup -->|"fetch Tavily key — managed identity"| KV["Key Vault: alpha-research-kv"]
-    SB -.->|"KEDA polls queue depth\n(managed identity)"| WorkerGroup
-    SB -.->|"KEDA polls queue depth\n(managed identity)"| EmbedWorker
-    ENV -.->|pulls images| ACR
-    ENV -.->|logs/metrics| LAW
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>tickerjob, tokenusage, tickerprofile,<br/>researchreport (pgvector), checkpoints")]
+    Redis[("Managed Redis:<br/>alpha-research-cache")]
+    APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>gpt-5-mini, text-embedding-3-small"]
+    KeyVault[("Key Vault: alpha-research-kv<br/>(Tavily API key)")]
+    ContentSafety["Content Safety: alpha-research-contentsafety<br/>(Prompt Shields)"]
+    AppInsights["Application Insights:<br/>alpha-research-insights"]
+    LAW[("Log Analytics workspace:<br/>workspace-alphargK2N9")]
+
+    User --> SWA
+    SWA -->|"HTTPS + Bearer JWT"| API
+    API -.->|"validate token"| Entra
+    API -->|send job| SB
+    SB -->|deliver job| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
+    API -->|read/write status, search| PG
+    WorkerGroup -->|write status/result/token-cost| PG
+    EmbedWorker -->|write report + vector| PG
+    API -->|cache check| Redis
+    WorkerGroup -->|cache write| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity"| OpenAI
+    WorkerGroup -->|"HTTPS, search_web"| MCPSearch
+    MCPSearch -->|"own managed identity"| KeyVault
+    WorkerGroup -->|"scan search results"| ContentSafety
+    API -->|OpenTelemetry| AppInsights
+    WorkerGroup -->|OpenTelemetry| AppInsights
+    OpenAI -.->|diagnostic logs| LAW
+    AppInsights -.->|same workspace| LAW
 ```
 
 ## Live URLs
@@ -97,26 +114,27 @@ flowchart TD
 
 ## What's working right now
 
-- Ticker input (comma-separated, multi-ticker) with an explicit US/India market selector — a ticker
-  is only looked up in the chosen market, with a clear error on a mismatch rather than guessing.
-- Real end-to-end flow: each ticker in a request fans out independently — submit → per-ticker cache
-  check (Azure Managed Redis) → cache hit returns instantly, cache miss queues via Azure Service Bus →
-  real worker picks it up → status written to Azure Database for PostgreSQL → frontend polls and
-  aggregates all tickers' results once every one is done.
-- A same-day repeat request for a ticker already computed returns instantly from cache, skipping the
-  queue entirely; a request mixing a cached ticker with a fresh one correctly returns the cached one
-  immediately while only the fresh one is computed.
-- Real stock data (price, P/E, 52-week range) from `yfinance`, plus a rule-based risk-flag Skill
-  (near 52-week low, high/negative P/E) — both deterministic, run on every ticker regardless of
-  what the agent below decides.
-- A real single agent (Azure OpenAI `gpt-5-mini`) that decides, at runtime, which tools to call:
-  the same stock-data lookup, a real MCP-backed web search (Tavily), and one genuine
-  LLM-discoverable Skill (`assess_news_sentiment`) it can choose to load and apply with its own
-  judgment — distinct from the deterministic risk-flag Skill, which it always runs regardless.
-- Real narrative summarization: the agent's own synthesized answer is appended to the deterministic
-  report as an "AI summary" line — both run side by side, deliberately, not one replacing the other.
-- Every real call's token usage and an estimated cost are logged to Postgres (`token_usage` table),
-  one row per ticker per job.
+- Ticker input (comma-separated, multi-ticker) with an explicit US/India market selector.
+- Real end-to-end flow: each ticker fans out independently — submit → per-ticker cache check
+  (Redis) → cache miss queues via Service Bus → real worker runs the full 6-agent graph →
+  status/result written to Postgres → frontend polls and aggregates all tickers once done.
+- A real 6-agent LangGraph pipeline: Fundamentals, Technical, and News run in parallel; Risk
+  waits on all three; Devil's Advocate builds a real bear-case counter-thesis; Decision computes
+  intrinsic value and checks deterministic hard-stop rules, then reaches a final BUY/HOLD/SELL
+  recommendation weighing every other agent's input, including the counter-thesis.
+- A real, structured report view — a recommendation banner, price/intrinsic-value cards, a
+  hard-stop callout when one fires, and a distinct Devil's Advocate section — not just plain text.
+- A **History tab**: browse past completed reports filtered by ticker and/or date range, reusing
+  the same data every job already persists.
+- Explicit per-ticker failure states in the UI — a partially-failed multi-ticker job shows exactly
+  which ticker failed and why, not a generic error.
+- A `job_id` shown (and copyable) on every completed report, for tracing a specific run end to end
+  in Application Insights.
+- Real guardrails: Prompt Shields scans every search result for injection attempts before it
+  reaches a model; basic PII scrubbing on the one free-text input (`/search`).
+- Real observability: per-agent duration and token usage, correlated by `job_id`, queryable in
+  Application Insights.
+- Every real call's token usage and estimated cost logged to Postgres, one row per ticker per job.
 
 ## Running locally
 
@@ -133,4 +151,9 @@ uv run uvicorn main:app --reload
 # worker
 cd backend/worker
 uv run python worker.py
+
+# MCP search server (its own standalone service since Phase 11 -- worker.py
+# reaches it over HTTP via MCP_SEARCH_URL, defaulting to localhost for local dev)
+cd backend/worker/mcp_server
+TAVILY_API_KEY=... uv run python search_server.py
 ```
