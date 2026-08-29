@@ -4,23 +4,28 @@ A minimal MCP server exposing one tool: web search via Tavily.
 Adapted from buynobuy's skills/utils/search.py::_tavily() — simplified to just
 the primary backend for this first pass (no DuckDuckGo/Playwright fallback yet).
 
-Run standalone for testing: TAVILY_API_KEY=... uv run python mcp_server/search_server.py
-(the caller normally supplies this via env=, see tools/web_search.py)
-In production this gets spawned as a subprocess by the worker (stdio transport) —
-see decisions.md ("MCP search server — local shape now, real shape later").
+Phase 11 — graduated from Option A (stdio, spawned as a subprocess by
+alpha-worker) to Option B: its own Container App, HTTP transport
+(streamable-http), independently autoscaled. Resolving the Tavily key is now
+this process's own job — Key Vault via its own Managed Identity in Azure, a
+plain env var locally — since there's no longer a parent process resolving
+it once and handing it down via subprocess env=.
+
+Run standalone for local testing: TAVILY_API_KEY=... uv run python search_server.py
 """
 import os
 from mcp.server.mcpserver import MCPServer
 from tavily import TavilyClient
 
-# Phase 8, Stage D -- the caller (tools/web_search.py) resolves the real key
-# once, whether from Key Vault (Azure) or .env.local (local dev), and passes
-# it down explicitly via the subprocess's env= -- this process just reads it.
-# Not resolved here: a fresh subprocess is spawned per search_web call, so a
-# Key Vault round-trip in THIS process happened on every single call, adding
-# enough latency to cause a real Service Bus message-lock timeout in
-# production on a job with several searches.
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+KEY_VAULT_URL = os.environ.get("KEY_VAULT_URL")
+if KEY_VAULT_URL:
+    from azure.identity import DefaultAzureCredential
+    from azure.keyvault.secrets import SecretClient
+
+    _kv_client = SecretClient(vault_url=KEY_VAULT_URL, credential=DefaultAzureCredential())
+    TAVILY_API_KEY = _kv_client.get_secret("tavily-api-key").value
+else:
+    TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
 mcp = MCPServer("search-server")
 
@@ -41,4 +46,8 @@ def search(query: str, max_results: int = 5) -> list[dict]:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # Container Apps injects the listening port via $PORT for HTTP ingress
+    # targets -- defaulting to 8811 for local runs, matching the port used
+    # throughout local testing.
+    port = int(os.environ.get("PORT", 8811))
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port, stateless_http=True)

@@ -1,0 +1,12 @@
+[project]
+name = "alpha-mcp-search"
+version = "0.1.0"
+description = "Standalone MCP search server -- Phase 11 Option B graduation"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "azure-identity>=1.25.3",
+    "azure-keyvault-secrets>=4.11.2",
+    "mcp>=2.0.0",
+    "tavily-python>=0.7.27",
+]
