@@ -2,7 +2,13 @@
 Technical agent -- same shape as fundamentals_agent.py: fetching technical
 indicators is always required, never a judgment call, so this fetches
 directly and uses a single run_synthesis() call for the narrative.
+
+Phase 10, Stage C -- same synchronous-yfinance-call bug as
+fundamentals_agent.py, found the same way (a real trace showing this
+"parallel" branch taking as long as its blocking siblings). See that
+file's docstring for the full story.
 """
+import asyncio
 from agent_harness import run_synthesis
 from tools.technical_indicators import fetch_technical_indicators
 
@@ -16,7 +22,7 @@ SYSTEM_PROMPT = (
 
 
 async def run(ticker: str, market: str) -> dict:
-    data = fetch_technical_indicators(ticker, market)
+    data = await asyncio.to_thread(fetch_technical_indicators, ticker, market)
     if "error" in data:
         return {"status": "error", "error": data["error"], "data": data}
 

@@ -20,6 +20,7 @@ regardless of what the model's own text said. The model's real job is
 weighing the narrative signals and the hard-stop RESULT together, not
 re-deriving whether a hard stop fired.
 """
+import asyncio
 from agent_harness import run_agent
 from tools.extended_fundamentals import fetch_extended_fundamentals
 from tools.valuation import compute_intrinsic_value
@@ -50,7 +51,13 @@ async def run(
     risk_summary: str,
     devil_advocate_summary: str = "",
 ) -> dict:
-    extended_data = fetch_extended_fundamentals(ticker, market)
+    # Phase 10, Stage C -- same synchronous-yfinance blocking bug as
+    # fundamentals_agent.py/technical_agent.py, found via a real trace.
+    # Decision runs sequentially (no concurrent sibling to stall) so this
+    # specific call site never produced the "parallel branches all block on
+    # each other" symptom those two did -- fixed anyway for consistency, and
+    # because it shortens Decision's own wall-clock time regardless.
+    extended_data = await asyncio.to_thread(fetch_extended_fundamentals, ticker, market)
 
     async def compute_intrinsic_value_tool():
         return compute_intrinsic_value(
