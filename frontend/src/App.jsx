@@ -26,6 +26,8 @@ function ResearchApp() {
   const [error, setError] = useState('')
   const [status, setStatus] = useState('idle') // 'idle' | 'loading' | 'done'
   const [report, setReport] = useState(null)
+  const [jobId, setJobId] = useState(null)
+  const [copied, setCopied] = useState(false)
 
   // acquireTokenSilent uses MSAL's own cache and only makes a real network
   // call when the cached token is actually close to expiring -- calling this
@@ -112,6 +114,7 @@ function ResearchApp() {
     }
 
     const { job_id } = await response.json()
+    setJobId(job_id)
     pollStatus(job_id)
   }
 
@@ -183,6 +186,18 @@ function ResearchApp() {
     setTickerInput('')
     setTickers([])
     setReport(null)
+    setJobId(null)
+    setCopied(false)
+  }
+
+  // Phase 10 -- the one thing a real bug report needs to be actionable: the
+  // job_id that ties this report to a real trace in Application Insights
+  // (see book/chapter-10-observability.md). Copy-to-clipboard makes "quote
+  // this ID" a one-click action instead of a select-and-hope one.
+  function handleCopyJobId() {
+    navigator.clipboard.writeText(jobId)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }
 
   return (
@@ -212,6 +227,14 @@ function ResearchApp() {
         <div>
           <ReportView report={report} />
           <button onClick={handleReset}>New search</button>
+          {jobId && (
+            <p className="job-id-line">
+              Job ID: <code>{jobId}</code>{' '}
+              <button className="copy-btn" onClick={handleCopyJobId}>
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </p>
+          )}
         </div>
       )}
     </div>

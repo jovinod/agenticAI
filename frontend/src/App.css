@@ -286,6 +286,32 @@
 .hard-stop h3 { color: #c53030; margin-bottom: 8px; font-size: 14px; }
 .hard-stop li { color: #9b2c2c; margin-left: 20px; font-size: 14px; }
 
+.job-id-line {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.6;
+}
+.job-id-line code {
+  background: var(--code-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.job-id-line .copy-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.job-id-line .copy-btn:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
 .price-snapshot {
   display: flex;
   gap: 12px;
