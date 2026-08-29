@@ -19,10 +19,16 @@ show, not just silence until the whole graph completes.
 """
 import operator
 from typing import Annotated, TypedDict
+from opentelemetry import trace
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import RetryPolicy
 from agents import fundamentals_agent, technical_agent, news_agent, risk_agent, devil_agent, decision_agent
 from memory.short_term import write_progress
+
+# Phase 10, Stage C -- one span per agent node, nested under process_ticker's
+# root span (worker.py). This is what actually gives "each agent's duration"
+# in a real trace, not just one undifferentiated blob per job.
+tracer = trace.get_tracer(__name__)
 
 
 class ResearchState(TypedDict):
@@ -85,117 +91,141 @@ async def _degraded_result(job_id: str, ticker: str, node_name: str, state_key: 
 
 
 async def fundamentals_node(state: ResearchState) -> dict:
-    try:
-        result = await fundamentals_agent.run(state["ticker"], state["market"])
-    except Exception as exc:
-        return await _degraded_result(
-            state["job_id"], state["ticker"], "fundamentals", "fundamentals_summary", exc, {"fundamentals_data": {}}
-        )
-    summary = result.get("answer") or result.get("error", "Fundamentals data unavailable.")
-    await write_progress(state["job_id"], state["ticker"], "fundamentals", summary)
-    return {
-        "fundamentals_data": result.get("data", {}),
-        "fundamentals_summary": summary,
-        "usage_log": [result.get("usage", {})],
-    }
+    with tracer.start_as_current_span("agent:fundamentals") as span:
+        span.set_attribute("job_id", state["job_id"])
+        span.set_attribute("ticker", state["ticker"])
+        try:
+            result = await fundamentals_agent.run(state["ticker"], state["market"])
+        except Exception as exc:
+            return await _degraded_result(
+                state["job_id"], state["ticker"], "fundamentals", "fundamentals_summary", exc, {"fundamentals_data": {}}
+            )
+        span.set_attribute("total_tokens", result.get("usage", {}).get("total_tokens", 0))
+        summary = result.get("answer") or result.get("error", "Fundamentals data unavailable.")
+        await write_progress(state["job_id"], state["ticker"], "fundamentals", summary)
+        return {
+            "fundamentals_data": result.get("data", {}),
+            "fundamentals_summary": summary,
+            "usage_log": [result.get("usage", {})],
+        }
 
 
 async def technical_node(state: ResearchState) -> dict:
-    try:
-        result = await technical_agent.run(state["ticker"], state["market"])
-    except Exception as exc:
-        return await _degraded_result(state["job_id"], state["ticker"], "technical", "technical_summary", exc)
-    summary = result.get("answer") or result.get("error", "Technical data unavailable.")
-    await write_progress(state["job_id"], state["ticker"], "technical", summary)
-    return {
-        "technical_summary": summary,
-        "usage_log": [result.get("usage", {})],
-    }
+    with tracer.start_as_current_span("agent:technical") as span:
+        span.set_attribute("job_id", state["job_id"])
+        span.set_attribute("ticker", state["ticker"])
+        try:
+            result = await technical_agent.run(state["ticker"], state["market"])
+        except Exception as exc:
+            return await _degraded_result(state["job_id"], state["ticker"], "technical", "technical_summary", exc)
+        span.set_attribute("total_tokens", result.get("usage", {}).get("total_tokens", 0))
+        summary = result.get("answer") or result.get("error", "Technical data unavailable.")
+        await write_progress(state["job_id"], state["ticker"], "technical", summary)
+        return {
+            "technical_summary": summary,
+            "usage_log": [result.get("usage", {})],
+        }
 
 
 async def news_node(state: ResearchState) -> dict:
-    try:
-        result = await news_agent.run(state["ticker"], state["market"])
-    except Exception as exc:
-        return await _degraded_result(state["job_id"], state["ticker"], "news", "news_summary", exc)
-    summary = result.get("answer", "News assessment unavailable.")
-    await write_progress(state["job_id"], state["ticker"], "news", summary)
-    return {
-        "news_summary": summary,
-        "usage_log": [result.get("usage", {})],
-    }
+    with tracer.start_as_current_span("agent:news") as span:
+        span.set_attribute("job_id", state["job_id"])
+        span.set_attribute("ticker", state["ticker"])
+        try:
+            result = await news_agent.run(state["ticker"], state["market"])
+        except Exception as exc:
+            return await _degraded_result(state["job_id"], state["ticker"], "news", "news_summary", exc)
+        span.set_attribute("total_tokens", result.get("usage", {}).get("total_tokens", 0))
+        summary = result.get("answer", "News assessment unavailable.")
+        await write_progress(state["job_id"], state["ticker"], "news", summary)
+        return {
+            "news_summary": summary,
+            "usage_log": [result.get("usage", {})],
+        }
 
 
 async def risk_node(state: ResearchState) -> dict:
-    try:
-        result = await risk_agent.run(
-            state.get("fundamentals_data", {}),
-            state.get("fundamentals_summary", ""),
-            state.get("technical_summary", ""),
-            state.get("news_summary", ""),
-        )
-    except Exception as exc:
-        return await _degraded_result(
-            state["job_id"], state["ticker"], "risk", "risk_summary", exc, {"risk_flags": []}
-        )
-    summary = result.get("answer", "Risk assessment unavailable.")
-    await write_progress(state["job_id"], state["ticker"], "risk", summary)
-    return {
-        "risk_summary": summary,
-        "risk_flags": result.get("flags", []),
-        "usage_log": [result.get("usage", {})],
-    }
+    with tracer.start_as_current_span("agent:risk") as span:
+        span.set_attribute("job_id", state["job_id"])
+        span.set_attribute("ticker", state["ticker"])
+        try:
+            result = await risk_agent.run(
+                state.get("fundamentals_data", {}),
+                state.get("fundamentals_summary", ""),
+                state.get("technical_summary", ""),
+                state.get("news_summary", ""),
+            )
+        except Exception as exc:
+            return await _degraded_result(
+                state["job_id"], state["ticker"], "risk", "risk_summary", exc, {"risk_flags": []}
+            )
+        span.set_attribute("total_tokens", result.get("usage", {}).get("total_tokens", 0))
+        summary = result.get("answer", "Risk assessment unavailable.")
+        await write_progress(state["job_id"], state["ticker"], "risk", summary)
+        return {
+            "risk_summary": summary,
+            "risk_flags": result.get("flags", []),
+            "usage_log": [result.get("usage", {})],
+        }
 
 
 async def devil_advocate_node(state: ResearchState) -> dict:
-    try:
-        result = await devil_agent.run(
-            state["ticker"],
-            state["market"],
-            state.get("fundamentals_summary", ""),
-            state.get("technical_summary", ""),
-            state.get("news_summary", ""),
-            state.get("risk_summary", ""),
-        )
-    except Exception as exc:
-        return await _degraded_result(
-            state["job_id"], state["ticker"], "devil_advocate", "devil_advocate_summary", exc, {"devil_advocate_data": {}}
-        )
-    summary = result.get("answer", "Devil's Advocate assessment unavailable.")
-    await write_progress(state["job_id"], state["ticker"], "devil_advocate", summary)
-    return {
-        "devil_advocate_summary": summary,
-        "devil_advocate_data": result,
-        "usage_log": [result.get("usage", {})],
-    }
+    with tracer.start_as_current_span("agent:devil_advocate") as span:
+        span.set_attribute("job_id", state["job_id"])
+        span.set_attribute("ticker", state["ticker"])
+        try:
+            result = await devil_agent.run(
+                state["ticker"],
+                state["market"],
+                state.get("fundamentals_summary", ""),
+                state.get("technical_summary", ""),
+                state.get("news_summary", ""),
+                state.get("risk_summary", ""),
+            )
+        except Exception as exc:
+            return await _degraded_result(
+                state["job_id"], state["ticker"], "devil_advocate", "devil_advocate_summary", exc, {"devil_advocate_data": {}}
+            )
+        span.set_attribute("total_tokens", result.get("usage", {}).get("total_tokens", 0))
+        summary = result.get("answer", "Devil's Advocate assessment unavailable.")
+        await write_progress(state["job_id"], state["ticker"], "devil_advocate", summary)
+        return {
+            "devil_advocate_summary": summary,
+            "devil_advocate_data": result,
+            "usage_log": [result.get("usage", {})],
+        }
 
 
 async def decision_node(state: ResearchState) -> dict:
-    try:
-        result = await decision_agent.run(
-            state["ticker"],
-            state["market"],
-            state.get("fundamentals_summary", ""),
-            state.get("technical_summary", ""),
-            state.get("news_summary", ""),
-            state.get("risk_summary", ""),
-            state.get("devil_advocate_summary", ""),
-        )
-    except Exception as exc:
-        return await _degraded_result(
-            state["job_id"], state["ticker"], "decision", "final_report", exc,
-            {"recommendation": "HOLD", "overall_score": None, "hard_stops_triggered": [], "intrinsic_value": {}},
-        )
-    summary = result.get("answer", "Report unavailable.")
-    await write_progress(state["job_id"], state["ticker"], "decision", summary)
-    return {
-        "final_report": summary,
-        "recommendation": result.get("recommendation", "HOLD"),
-        "overall_score": result.get("overall_score"),
-        "hard_stops_triggered": result.get("hard_stops_triggered", []),
-        "intrinsic_value": result.get("intrinsic_value", {}),
-        "usage_log": [result.get("usage", {})],
-    }
+    with tracer.start_as_current_span("agent:decision") as span:
+        span.set_attribute("job_id", state["job_id"])
+        span.set_attribute("ticker", state["ticker"])
+        try:
+            result = await decision_agent.run(
+                state["ticker"],
+                state["market"],
+                state.get("fundamentals_summary", ""),
+                state.get("technical_summary", ""),
+                state.get("news_summary", ""),
+                state.get("risk_summary", ""),
+                state.get("devil_advocate_summary", ""),
+            )
+        except Exception as exc:
+            return await _degraded_result(
+                state["job_id"], state["ticker"], "decision", "final_report", exc,
+                {"recommendation": "HOLD", "overall_score": None, "hard_stops_triggered": [], "intrinsic_value": {}},
+            )
+        span.set_attribute("total_tokens", result.get("usage", {}).get("total_tokens", 0))
+        summary = result.get("answer", "Report unavailable.")
+        await write_progress(state["job_id"], state["ticker"], "decision", summary)
+        return {
+            "final_report": summary,
+            "recommendation": result.get("recommendation", "HOLD"),
+            "overall_score": result.get("overall_score"),
+            "hard_stops_triggered": result.get("hard_stops_triggered", []),
+            "intrinsic_value": result.get("intrinsic_value", {}),
+            "usage_log": [result.get("usage", {})],
+        }
 
 
 def build_graph(checkpointer=None):

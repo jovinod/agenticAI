@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from dotenv import load_dotenv
 from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
@@ -15,10 +15,26 @@ from models import TickerJob, TokenUsage, TickerProfile
 from agents.graph import run_research
 from llm.model_client import AZURE_OPENAI_DEPLOYMENT
 from redis_client import redis_client
+from opentelemetry import trace
 
 # No-op in Azure (no .env.local file there) — Container Apps sets real env vars directly.
 # Doesn't override an already-set env var, so an explicit shell export still wins if used.
 load_dotenv(".env.local")
+
+# Phase 10, Stage C -- same no-op-locally shape as alpha-api's Stage B setup.
+# HTTPXClientInstrumentor is what makes every outbound call (Azure OpenAI via
+# APIM in model_client.py, Tavily in tools/web_search.py, Content Safety in
+# tools/prompt_shields.py) show up as its own dependency span automatically,
+# nested under whichever span is active -- no per-file changes needed in any
+# of those three.
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+    configure_azure_monitor()
+    HTTPXClientInstrumentor().instrument()
+
+tracer = trace.get_tracer(__name__)
 
 # Phase 8, Stage B -- Managed Identity instead of a password secret, when
 # running in Azure. Same reasoning as backend/api/main.py: the local Docker
@@ -104,7 +120,27 @@ def _upsert_ticker_profile(session, ticker: str, market: str, sector, industry):
     session.commit()
 
 
-async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, checkpointer):
+async def process_ticker(job_id: str, ticker: str, market: str, embed_sender, checkpointer, queue_wait_seconds: float | None = None):
+    """Phase 10, Stage C -- a thin span-opening wrapper around the real work
+    in _process_ticker, so the whole ticker's processing (the graph run,
+    every agent's own span, every httpx dependency call) nests under ONE
+    root span/trace instead of each starting its own disconnected trace.
+    Kept as a separate function specifically so _process_ticker's existing
+    body needs zero re-indentation -- this wrapper is the only new code."""
+    with tracer.start_as_current_span("process_ticker") as span:
+        span.set_attribute("job_id", job_id)
+        span.set_attribute("ticker", ticker)
+        span.set_attribute("market", market)
+        if queue_wait_seconds is not None:
+            # phases.md explicitly asks for queue time as part of a job's
+            # reconstructed lifecycle. Service Bus already tracks this
+            # (enqueued_time_utc); this just surfaces it on the same trace
+            # as everything else instead of it being a separate lookup.
+            span.set_attribute("queue_wait_seconds", queue_wait_seconds)
+        await _process_ticker(job_id, ticker, market, embed_sender, checkpointer)
+
+
+async def _process_ticker(job_id: str, ticker: str, market: str, embed_sender, checkpointer):
     with Session(engine) as session:
         task = session.exec(
             select(TickerJob).where(TickerJob.job_id == job_id, TickerJob.ticker == ticker)
@@ -294,7 +330,10 @@ async def main():
                         print(f"Failed to drop malformed message: {complete_exc}")
                     continue
 
-                await process_ticker(job_id, ticker, market, embed_sender, checkpointer)
+                queue_wait_seconds = None
+                if msg.enqueued_time_utc:
+                    queue_wait_seconds = (datetime.now(timezone.utc) - msg.enqueued_time_utc).total_seconds()
+                await process_ticker(job_id, ticker, market, embed_sender, checkpointer, queue_wait_seconds)
                 try:
                     await receiver.complete_message(msg)  # acknowledge — without this, Service Bus redelivers it
                 except Exception as exc:
