@@ -82,13 +82,37 @@ function TickerReport({ ticker, decision }) {
   )
 }
 
+// Phase 12 -- a genuinely failed ticker gets its own clearly-styled card,
+// driven by the backend's explicit ticker_status (not by sniffing the raw
+// error text in `summary`, which was the only signal available before).
+function FailedReport({ ticker, message }) {
+  return (
+    <div className="ticker-report">
+      <h2 className="ticker-report-heading">{ticker}</h2>
+      <div className="ticker-failed">
+        <span className="ticker-failed-icon" aria-hidden="true">!</span>
+        <div>
+          <div className="ticker-failed-title">Research failed for {ticker}</div>
+          <div className="ticker-failed-detail">{message || 'An unexpected error occurred while researching this ticker.'}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ReportView({ report }) {
   return (
     <div className="report-view">
       {report.tickers.map((ticker) => {
+        const lines = report.summary.filter((line) => line.startsWith(`${ticker}:`))
+
+        if (report.ticker_status?.[ticker] === 'failed') {
+          const message = lines[0]?.replace(`${ticker}:`, '').trim()
+          return <FailedReport key={ticker} ticker={ticker} message={message} />
+        }
+
         const decision = report.decisions?.[ticker]
         if (!decision) {
-          const lines = report.summary.filter((line) => line.startsWith(`${ticker}:`))
           return (
             <div className="ticker-report" key={ticker}>
               <h2 className="ticker-report-heading">{ticker}</h2>

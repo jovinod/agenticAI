@@ -205,13 +205,20 @@ async def get_research(job_id: str):
     tickers = []
     summary = []
     decisions = {}
+    ticker_status = {}
     for t in tasks:
         tickers.append(t.ticker)
+        ticker_status[t.ticker] = t.status
         parsed = json.loads(t.result)
         summary.extend(parsed["summary"])
         decisions.update(parsed.get("decisions", {}))  # absent on a failed ticker's result -- not every job reaches Decision
 
-    return {"status": "done", "result": {"tickers": tickers, "summary": summary, "decisions": decisions}}
+    # Phase 12 -- a multi-ticker job can partially fail (one ticker permanently
+    # failed, others succeeded), and the frontend previously had no reliable
+    # way to tell WHICH ticker failed beyond string-sniffing the raw error
+    # text embedded in `summary`. ticker_status makes that an explicit,
+    # per-ticker signal instead.
+    return {"status": "done", "result": {"tickers": tickers, "summary": summary, "decisions": decisions, "ticker_status": ticker_status}}
 
 
 @app.get("/reports", dependencies=[Depends(require_user)])

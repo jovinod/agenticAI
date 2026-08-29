@@ -286,6 +286,32 @@
 .hard-stop h3 { color: #c53030; margin-bottom: 8px; font-size: 14px; }
 .hard-stop li { color: #9b2c2c; margin-left: 20px; font-size: 14px; }
 
+.ticker-failed {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: rgba(229, 62, 62, 0.08);
+  border: 2px solid #fc8181;
+  border-radius: 10px;
+  padding: 14px 20px;
+  margin-bottom: 16px;
+}
+.ticker-failed-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  border-radius: 50%;
+  background: #e53e3e;
+  color: white;
+  font-weight: 700;
+  font-size: 14px;
+}
+.ticker-failed-title { color: #c53030; font-weight: 700; margin-bottom: 4px; }
+.ticker-failed-detail { color: #9b2c2c; font-size: 14px; }
+
 .tab-bar {
   display: flex;
   gap: 4px;

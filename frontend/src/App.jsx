@@ -310,11 +310,19 @@ function HistoryTab({ getAccessToken }) {
     }
 
     // Narrow the (possibly multi-ticker) job result down to just the one
-    // ticker selected from the list -- ReportView expects this exact shape.
+    // ticker selected from the list -- ReportView expects this exact shape,
+    // including ticker_status so a historical failed ticker renders the
+    // same distinct failure card the live flow does, not an empty state.
     const decision = data.result.decisions?.[entry.ticker]
+    const summaryLines = (data.result.summary || []).filter((line) => line.startsWith(`${entry.ticker}:`))
     setSelectedReport({
       ticker: entry.ticker,
-      report: { tickers: [entry.ticker], summary: [], decisions: decision ? { [entry.ticker]: decision } : {} },
+      report: {
+        tickers: [entry.ticker],
+        summary: summaryLines,
+        decisions: decision ? { [entry.ticker]: decision } : {},
+        ticker_status: data.result.ticker_status,
+      },
     })
   }
 
