@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useMsal, AuthenticatedTemplate, UnauthenticatedTemplate } from '@azure/msal-react'
 import { InteractionRequiredAuthError } from '@azure/msal-browser'
 import { loginRequest } from './authConfig.js'
@@ -7,13 +7,23 @@ import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
+function Wordmark() {
+  return (
+    <h1 className="wordmark">
+      alpha<span className="wordmark-accent">.</span>
+    </h1>
+  )
+}
+
 function SignInScreen() {
   const { instance } = useMsal()
   return (
     <div id="center">
-      <h1>Alpha - Stock Research</h1>
+      <Wordmark />
       <p>Please sign in to continue.</p>
-      <button onClick={() => instance.loginRedirect(loginRequest)}>Sign in with Microsoft</button>
+      <button className="primary-btn" onClick={() => instance.loginRedirect(loginRequest)}>
+        Sign in with Microsoft
+      </button>
     </div>
   )
 }
@@ -185,17 +195,20 @@ function ResearchTab({ getAccessToken }) {
     <>
       {status === 'idle' && (
         <>
-          <select value={market} onChange={(e) => setMarket(e.target.value)}>
-            <option value="US">US market</option>
-            <option value="India">India market (NSE/BSE)</option>
-          </select>
-          <input
-            type="text"
-            placeholder={market === 'US' ? 'e.g. AAPL, TSLA' : 'e.g. RELIANCE, TCS'}
-            value={tickerInput}
-            onChange={(e) => setTickerInput(e.target.value)}
-          />
-          <button onClick={handleSubmit}>Analyze</button>
+          <div className="search-bar">
+            <select value={market} onChange={(e) => setMarket(e.target.value)}>
+              <option value="US">US</option>
+              <option value="India">India</option>
+            </select>
+            <input
+              type="text"
+              placeholder={market === 'US' ? 'e.g. AAPL, TSLA' : 'e.g. RELIANCE, TCS'}
+              value={tickerInput}
+              onChange={(e) => setTickerInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+            />
+            <button className="primary-btn" onClick={handleSubmit}>Analyze</button>
+          </div>
           {error && <p className="error">{error}</p>}
         </>
       )}
@@ -205,7 +218,7 @@ function ResearchTab({ getAccessToken }) {
       {status === 'done' && report && (
         <div>
           <ReportView report={report} />
-          <button onClick={handleReset}>New search</button>
+          <button className="subtle-btn" onClick={handleReset}>New search</button>
           {jobId && (
             <p className="job-id-line">
               Job ID: <code>{jobId}</code>{' '}
@@ -228,14 +241,12 @@ function ResearchTab({ getAccessToken }) {
 // a time, and the existing /research/{job_id} endpoint to fetch full detail.
 function HistoryTab({ getAccessToken }) {
   const [tickerFilter, setTickerFilter] = useState('')
-  const [dateFrom, setDateFrom] = useState('')
-  const [dateTo, setDateTo] = useState('')
   const [reports, setReports] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [selectedReport, setSelectedReport] = useState(null) // { ticker, report } once loaded
 
-  async function handleSearch() {
+  async function fetchReports(ticker) {
     setError('')
     setLoading(true)
     setSelectedReport(null)
@@ -250,9 +261,7 @@ function HistoryTab({ getAccessToken }) {
     }
 
     const params = new URLSearchParams()
-    if (tickerFilter.trim()) params.set('ticker', tickerFilter.trim().toUpperCase())
-    if (dateFrom) params.set('date_from', dateFrom)
-    if (dateTo) params.set('date_to', dateTo)
+    if (ticker) params.set('ticker', ticker)
 
     let response
     try {
@@ -274,6 +283,16 @@ function HistoryTab({ getAccessToken }) {
     const data = await response.json()
     setReports(data.reports)
     setLoading(false)
+  }
+
+  // Load every prior run as soon as the tab opens -- ticker is an optional
+  // narrowing filter on top of that, not a requirement to see anything.
+  useEffect(() => {
+    fetchReports()
+  }, [])
+
+  function handleSearch() {
+    fetchReports(tickerFilter.trim().toUpperCase() || undefined)
   }
 
   async function handleSelect(entry) {
@@ -331,43 +350,50 @@ function HistoryTab({ getAccessToken }) {
       <div className="history-filters">
         <input
           type="text"
-          placeholder="Ticker (e.g. AAPL)"
+          placeholder="Filter by ticker (e.g. AAPL)"
           value={tickerFilter}
           onChange={(e) => setTickerFilter(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
         />
-        <label>
-          From <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-        </label>
-        <label>
-          To <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-        </label>
-        <button onClick={handleSearch} disabled={loading}>
+        <button className="primary-btn" onClick={handleSearch} disabled={loading}>
           {loading ? 'Searching...' : 'Search'}
         </button>
       </div>
 
       {error && <p className="error">{error}</p>}
 
-      {reports && reports.length === 0 && <p>No reports found for that filter.</p>}
+      {reports && reports.length === 0 && <p>No reports found.</p>}
 
       {reports && reports.length > 0 && !selectedReport && (
-        <ul className="history-list">
-          {reports.map((r) => (
-            <li key={`${r.job_id}:${r.ticker}`} className="history-item" onClick={() => handleSelect(r)}>
-              <span className="history-ticker">{r.ticker}</span>
-              <span className="history-market">{r.market}</span>
-              <span className={`history-rec history-rec-${(r.recommendation || '').toLowerCase()}`}>
-                {r.recommendation || 'N/A'}
-              </span>
-              <span className="history-date">{new Date(r.created_at).toLocaleString()}</span>
-            </li>
-          ))}
-        </ul>
+        <table className="history-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Market</th>
+              <th>Recommendation</th>
+              <th>Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reports.map((r) => (
+              <tr key={`${r.job_id}:${r.ticker}`} onClick={() => handleSelect(r)}>
+                <td className="history-ticker">{r.ticker}</td>
+                <td className="history-market">{r.market}</td>
+                <td>
+                  <span className={`history-rec history-rec-${(r.recommendation || '').toLowerCase()}`}>
+                    {r.recommendation || 'N/A'}
+                  </span>
+                </td>
+                <td className="history-date">{new Date(r.created_at).toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
 
       {selectedReport && (
         <div>
-          <button onClick={() => setSelectedReport(null)}>&larr; Back to list</button>
+          <button className="subtle-btn" onClick={() => setSelectedReport(null)}>&larr; Back to list</button>
           <ReportView report={selectedReport.report} />
         </div>
       )}
@@ -399,7 +425,7 @@ function ResearchApp() {
 
   return (
     <div id="center">
-      <h1>Alpha - Stock Research</h1>
+      <Wordmark />
 
       <div className="tab-bar">
         <button
