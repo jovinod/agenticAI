@@ -110,6 +110,69 @@ The dotted line is deliberate — it's a `job_id` match, not a parent-child span
 
 One new resource: **Application Insights** (`alpha-research-insights`), workspace-based, linked to the existing Log Analytics workspace — no new compute, no new network path from the browser. Diagnostic settings added to the existing `alpha-research-openai` resource (Stage A), exporting to the same workspace.
 
+## The Architecture So Far
+
+This is the diagram every chapter has grown, one real piece at a time, since Chapter 1's single box — last updated in Chapter 6. It went stale for three real phases in a row: Chapters 7-9 each added genuinely new resources (Entra ID and Key Vault in Chapter 8, Content Safety in Chapter 9) without bringing this shared diagram along. Brought fully current here, along with Application Insights, this chapter's own new piece.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    Entra["Microsoft Entra ID<br/>(sign-in + allow-list)"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
+
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
+    end
+
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas<br/>(1 replica per 5 queued msgs)"]
+
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ tokenusage, tickerprofile,<br/>researchreport, checkpoints (pgvector + LangGraph)")]
+    Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
+    APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — gpt-5-mini,<br/>text-embedding-3-small"]
+    KeyVault[("Key Vault: alpha-research-kv<br/>(Tavily API key)")]
+    ContentSafety["Content Safety: alpha-research-contentsafety<br/>(Prompt Shields)"]
+
+    User --> SWA
+    SWA -->|"HTTPS + Bearer JWT"| API
+    API -.->|"validate token, Ch. 8"| Entra
+    API -->|send job, per ticker on miss| SB
+    SB -->|deliver job, one per replica| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
+    API -->|read/write status, search| PG
+    WorkerGroup -->|write status/result/token-cost| PG
+    EmbedWorker -->|write report + vector| PG
+    API -->|cache check| Redis
+    WorkerGroup -->|cache write| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity (AAD token)"| OpenAI
+    WorkerGroup -->|"fetch Tavily key, Ch. 8"| KeyVault
+    WorkerGroup -->|"scan search results, Ch. 9"| ContentSafety
+```
+
+**This chapter's own addition, kept as a separate diagram rather than folded into the one above** — the resource-topology diagram answers "who calls whom"; this one answers "who reports telemetry, and to where," a genuinely different question that would just clutter the first diagram if merged in.
+
+```mermaid
+flowchart LR
+    OpenAI["Azure OpenAI:<br/>alpha-research-openai"]
+    API["alpha-api"]
+    Worker["alpha-worker"]
+    AI["Application Insights:<br/>alpha-research-insights"]
+    LA[("Log Analytics workspace:<br/>workspace-alphargK2N9")]
+
+    OpenAI -->|"diagnostic settings, Stage A<br/>(tokens, timing -- no content)"| LA
+    API -->|"OpenTelemetry, Stage B"| AI
+    Worker -->|"OpenTelemetry, Stage C"| AI
+    AI -->|"workspace-based --<br/>same physical storage"| LA
+```
+
 ## Where This Stands
 
 Per-agent duration, token usage, queue-wait time, and cross-trace `job_id` correlation are all real, deployed, and verified against live jobs — not just configured and assumed. One real bug, found only because this tracing existed, is fixed and measured: a ~58% reduction in per-ticker processing time.
