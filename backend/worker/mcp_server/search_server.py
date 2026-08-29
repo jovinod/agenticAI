@@ -18,21 +18,14 @@ from mcp.server.mcpserver import MCPServer
 from tavily import TavilyClient
 
 KEY_VAULT_URL = os.environ.get("KEY_VAULT_URL")
-print(f"DIAG: KEY_VAULT_URL={KEY_VAULT_URL!r}", flush=True)
 if KEY_VAULT_URL:
     from azure.identity import DefaultAzureCredential
     from azure.keyvault.secrets import SecretClient
 
-    try:
-        _kv_client = SecretClient(vault_url=KEY_VAULT_URL, credential=DefaultAzureCredential())
-        TAVILY_API_KEY = _kv_client.get_secret("tavily-api-key").value
-        print(f"DIAG: fetched key, length={len(TAVILY_API_KEY) if TAVILY_API_KEY else 0}", flush=True)
-    except Exception as exc:
-        print(f"DIAG: EXCEPTION fetching secret: {type(exc).__name__}: {exc}", flush=True)
-        TAVILY_API_KEY = ""
+    _kv_client = SecretClient(vault_url=KEY_VAULT_URL, credential=DefaultAzureCredential())
+    TAVILY_API_KEY = _kv_client.get_secret("tavily-api-key").value
 else:
     TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
-    print(f"DIAG: no KEY_VAULT_URL, falling back to env, length={len(TAVILY_API_KEY)}", flush=True)
 
 mcp = MCPServer("search-server")
 
@@ -57,4 +50,10 @@ if __name__ == "__main__":
     # targets -- defaulting to 8811 for local runs, matching the port used
     # throughout local testing.
     port = int(os.environ.get("PORT", 8811))
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=port, stateless_http=True)
+    # json_response=True -- found live: the default SSE/chunked-stream response
+    # shape worked perfectly on localhost (both from outside and inside the
+    # container) but hung indefinitely crossing Azure Container Apps' internal
+    # ingress proxy -- session.initialize() never received its response.
+    # Plain single-JSON responses avoid whatever the proxy does to the
+    # streamed shape.
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port, stateless_http=True, json_response=True)
