@@ -72,6 +72,60 @@ flowchart LR
     MCP -->|"own Managed Identity"| KV[("Key Vault:<br/>tavily-api-key")]
 ```
 
+## The Architecture So Far
+
+The shared master diagram, updated again — `alpha-mcp-search` is the one genuinely new box this chapter adds, and the Key Vault edge for the Tavily key moves with it: it's no longer `alpha-worker` fetching that secret directly, it's the new service, using its own identity.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    Entra["Microsoft Entra ID<br/>(sign-in + allow-list)"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
+
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
+    end
+
+    MCPSearch["Container App: alpha-mcp-search<br/>internal ingress only<br/>KEDA-scaled: 0-5 replicas"]
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas<br/>(1 replica per 5 queued msgs)"]
+
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ tokenusage, tickerprofile,<br/>researchreport, checkpoints (pgvector + LangGraph)")]
+    Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
+    APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — gpt-5-mini,<br/>text-embedding-3-small"]
+    KeyVault[("Key Vault: alpha-research-kv<br/>(Tavily API key)")]
+    ContentSafety["Content Safety: alpha-research-contentsafety<br/>(Prompt Shields)"]
+
+    User --> SWA
+    SWA -->|"HTTPS + Bearer JWT"| API
+    API -.->|"validate token, Ch. 8"| Entra
+    API -->|send job, per ticker on miss| SB
+    SB -->|deliver job, one per replica| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
+    API -->|read/write status, search| PG
+    WorkerGroup -->|write status/result/token-cost| PG
+    EmbedWorker -->|write report + vector| PG
+    API -->|cache check| Redis
+    WorkerGroup -->|cache write| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity (AAD token)"| OpenAI
+    WorkerGroup -->|"HTTPS, search_web -- NOT Key Vault<br/>directly anymore"| MCPSearch
+    MCPSearch -->|"own managed identity, Ch. 11"| KeyVault
+    WorkerGroup -->|"scan search results, Ch. 9"| ContentSafety
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
+    class User,SWA,Entra,API,SB,WorkerGroup,EmbedWorker,PG,Redis,APIM,OpenAI,KeyVault,ContentSafety existing
+    class MCPSearch new
+```
+
 ## Azure Components Used This Chapter
 
 One new resource: **Container App `alpha-mcp-search`** — internal-only ingress (never reachable from outside this system), its own system-assigned Managed Identity, scale-to-zero with a 5-replica ceiling. Reuses the existing `alpha-env` Container Apps environment and the existing `alpha-research-kv` Key Vault — no new infrastructure beyond the one app itself.

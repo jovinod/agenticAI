@@ -155,9 +155,14 @@ flowchart TB
     APIM -->|"managed identity (AAD token)"| OpenAI
     WorkerGroup -->|"fetch Tavily key, Ch. 8"| KeyVault
     WorkerGroup -->|"scan search results, Ch. 9"| ContentSafety
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    class User,SWA,Entra,API,SB,WorkerGroup,EmbedWorker,PG,Redis,APIM,OpenAI,KeyVault,ContentSafety existing
 ```
 
-**This chapter's own addition, kept as a separate diagram rather than folded into the one above** — the resource-topology diagram answers "who calls whom"; this one answers "who reports telemetry, and to where," a genuinely different question that would just clutter the first diagram if merged in.
+Nothing here is colored as "new" — every box was built in an earlier chapter (Entra ID and Key Vault in Chapter 8, Content Safety in Chapter 9). This diagram's own news is that it exists at all, current, in one place — not a new resource.
+
+**This chapter's own actual addition, kept as a separate diagram rather than folded into the one above** — the resource-topology diagram answers "who calls whom"; this one answers "who reports telemetry, and to where," a genuinely different question that would just clutter the first diagram if merged in.
 
 ```mermaid
 flowchart LR
@@ -171,6 +176,11 @@ flowchart LR
     API -->|"OpenTelemetry, Stage B"| AI
     Worker -->|"OpenTelemetry, Stage C"| AI
     AI -->|"workspace-based --<br/>same physical storage"| LA
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
+    class OpenAI,API,Worker,LA existing
+    class AI new
 ```
 
 ## Where This Stands
