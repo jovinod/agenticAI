@@ -1,7 +1,7 @@
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, time
 from typing import Literal
 import json
 from azure.monitor.opentelemetry import configure_azure_monitor
@@ -212,6 +212,50 @@ async def get_research(job_id: str):
         decisions.update(parsed.get("decisions", {}))  # absent on a failed ticker's result -- not every job reaches Decision
 
     return {"status": "done", "result": {"tickers": tickers, "summary": summary, "decisions": decisions}}
+
+
+@app.get("/reports", dependencies=[Depends(require_user)])
+async def list_reports(
+    ticker: str | None = None,
+    market: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 50,
+):
+    """Phase 12 -- the History tab's read side: browse past completed
+    research filtered by ticker/date, distinct from /search's semantic
+    lookup by meaning. Reads the same TickerJob rows /research/{job_id}
+    does -- no new table, this app already persists everything needed,
+    just never had a way to list/filter across jobs instead of one job
+    at a time."""
+    with Session(engine) as session:
+        query = select(TickerJob).where(TickerJob.status == "done")
+        if ticker:
+            query = query.where(TickerJob.ticker == ticker.strip().upper())
+        if market:
+            query = query.where(TickerJob.market == market)
+        if date_from:
+            query = query.where(TickerJob.created_at >= datetime.combine(date_from, time.min))
+        if date_to:
+            query = query.where(TickerJob.created_at <= datetime.combine(date_to, time.max))
+        query = query.order_by(TickerJob.created_at.desc()).limit(limit)
+        tasks = session.exec(query).all()
+
+    reports = []
+    for t in tasks:
+        recommendation = ""
+        if t.result:
+            decision = json.loads(t.result).get("decisions", {}).get(t.ticker, {})
+            recommendation = decision.get("recommendation", "")
+        reports.append({
+            "job_id": t.job_id,
+            "ticker": t.ticker,
+            "market": t.market,
+            "created_at": t.created_at.isoformat(),
+            "recommendation": recommendation,
+        })
+
+    return {"reports": reports}
 
 
 @app.get("/search", dependencies=[Depends(require_user)])

@@ -286,6 +286,94 @@
 .hard-stop h3 { color: #c53030; margin-bottom: 8px; font-size: 14px; }
 .hard-stop li { color: #9b2c2c; margin-left: 20px; font-size: 14px; }
 
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font-size: 14px;
+}
+.tab-btn:hover {
+  color: var(--accent);
+}
+.tab-btn.tab-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.history-tab {
+  text-align: left;
+}
+.history-filters {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.history-filters label {
+  font-size: 13px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.history-item:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+.history-ticker {
+  font-weight: 700;
+  min-width: 60px;
+}
+.history-market {
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.7;
+  min-width: 50px;
+}
+.history-rec {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  min-width: 50px;
+  text-align: center;
+}
+.history-rec-buy { color: #276749; background: rgba(56, 161, 105, 0.1); }
+.history-rec-hold { color: #975a16; background: rgba(214, 158, 46, 0.1); }
+.history-rec-sell { color: #9b2c2c; background: rgba(229, 62, 62, 0.1); }
+.history-date {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.7;
+}
+
 .job-id-line {
   margin-top: 16px;
   font-size: 11px;
