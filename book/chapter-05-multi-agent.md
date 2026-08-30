@@ -390,9 +390,11 @@ flowchart TD
     class WorkerPy,Graph,Fund,Tech,News,Risk,Synth,Harness,ModelClient,Discovery,SkillFile file
 ```
 
-## Azure Architecture — Three Real Scaling Pieces Now Deployed
+## Azure Components Used This Chapter
 
-Unlike most of this chapter, this section documents changes made in a later session, prompted directly by the reader's own follow-up questions about scaling — not a separate build pass, but real infrastructure added while working through exactly the scaling questions raised below. Both pieces are live, verified, not exploratory.
+Two genuinely new resources this chapter, beyond the scaling-specific pieces below. **Azure Cache for Redis** (`alpha-research-cache`) — short-term memory's backing store, needing no other new infrastructure since it was the very first tier built (see "Three-Tier Memory: Short-Term First" above), watched filling in live through the real public API. And a **second Azure AI Foundry deployment**, `text-embedding-3-small`, alongside the existing `gpt-5-mini` chat deployment from Chapter 4 — semantic memory's own real dependency, since `pgvector` stores and searches vectors but doesn't generate them.
+
+The rest of this section documents changes made in a later session, prompted directly by the reader's own follow-up questions about scaling — not a separate build pass, but real infrastructure added while working through exactly the scaling questions raised below. All three pieces are live, verified, not exploratory.
 
 **Azure API Management (Consumption tier)** now fronts the Foundry deployment, replacing the direct worker→Foundry call from earlier in this chapter:
 

@@ -91,6 +91,55 @@ flowchart TD
 
 None new, and no new edges either — unlike Chapter 6, this chapter's work is entirely in-process logic (retries, in-function fallback handling) with no new external interaction pattern to represent. The one real infrastructure action this chapter took was diagnostic/corrective, not additive: temporarily mutating the `apim-subscription-key` secret on `alpha-worker` to prove the failure path, then restoring it.
 
+## The Architecture So Far
+
+No new box this chapter, and no new edges either — every node and edge below is exactly what Chapter 6 ended with. Shown again for continuity, not because anything moved.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
+
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
+    end
+
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas<br/>(1 replica per 5 queued msgs)"]
+
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ tokenusage, tickerprofile,<br/>researchreport, checkpoints (pgvector + LangGraph)")]
+    Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
+    APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — gpt-5-mini,<br/>text-embedding-3-small"]
+
+    User --> SWA
+    SWA -->|HTTPS| API
+    API -->|send job, per ticker on miss| SB
+    SB -->|deliver job, one per replica| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
+    API -->|read status| PG
+    WorkerGroup -->|write status/result/token-cost| PG
+    WorkerGroup -->|"checkpoint check + write per super-step<br/>(thread_id = job_id:ticker)"| PG
+    EmbedWorker -->|write report + vector| PG
+    API -->|"search: read + embed query"| PG
+    API -->|cache check| Redis
+    WorkerGroup -->|cache write| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
+    WorkerGroup -->|publish report text| SB
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity (AAD token)"| OpenAI
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef replica fill:#e8f5e9,stroke:#66bb6a,stroke-width:1px,color:#2e7d32
+    class User,SWA,API,SB,PG,Redis,OpenAI,APIM,EmbedWorker,WorkerGroup existing
+    class W1,W2,Wdots replica
+```
+
 ## Where Phase 7 Actually Stands
 
 Both real failure modes phases.md names — transient (retries/backoff) and persistent (graceful partial results) — are built, deployed, and proven against the real 5-agent graph and the real live system, not just asserted. Failed-job tracking (the third phases.md item) exists at the ticker level: a permanently-failed *ticker* now gets a real `"failed"` `TickerJob` status rather than crashing the worker (built earlier in this same chapter's work, alongside the graph-level degradation). Dead-letter handling itself is Service Bus's own existing, unconfigured-by-us mechanism (`maxDeliveryCount: 10`) — real, but never exercised end-to-end in this project; worth naming as a boundary rather than silently assuming it's "covered."

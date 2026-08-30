@@ -165,6 +165,60 @@ flowchart TD
 
 One new resource: **Azure AI Content Safety** (`alpha-research-contentsafety`), Free tier (F0), providing the Prompt Shields `text:shieldPrompt` endpoint. Authenticated via `alpha-worker`'s existing Managed Identity (Chapter 8, Stage B/C's pattern extended to a new resource, not a new mechanism) plus a "Cognitive Services User" role grant and the custom-subdomain fix described above. No new compute, no new network path from the browser — this resource is only ever called from inside `alpha-worker`, never exposed publicly.
 
+## The Architecture So Far
+
+Chapter 8's end state, with Content Safety as the one new box this chapter adds.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    Entra["Microsoft Entra ID<br/>(sign-in + allow-list)"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
+
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
+    end
+
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas"]
+
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg")]
+    Redis[("Managed Redis:<br/>alpha-research-cache")]
+    APIM["API Management: alpha-research-apim"]
+    OpenAI["Azure OpenAI: alpha-research-openai"]
+    KeyVault[("Key Vault: alpha-research-kv<br/>(Tavily API key)")]
+    ContentSafety["Content Safety: alpha-research-contentsafety<br/>(Prompt Shields)"]
+
+    User --> SWA
+    SWA -->|"HTTPS + Bearer JWT"| API
+    API -.->|"validate token"| Entra
+    API -->|send job| SB
+    SB -->|deliver job| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
+    API -->|read/write status, search| PG
+    WorkerGroup -->|write status/result/token-cost| PG
+    EmbedWorker -->|write report + vector| PG
+    API -->|cache check| Redis
+    WorkerGroup -->|cache write| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key"| APIM
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity"| OpenAI
+    WorkerGroup -->|"fetch Tavily key"| KeyVault
+    WorkerGroup -->|"scan search results, this chapter"| ContentSafety
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
+    classDef replica fill:#e8f5e9,stroke:#66bb6a,stroke-width:1px,color:#2e7d32
+    class User,SWA,Entra,API,SB,WorkerGroup,EmbedWorker,PG,Redis,APIM,OpenAI,KeyVault existing
+    class ContentSafety new
+    class W1,W2,Wdots replica
+```
+
 ## Where This Stands
 
 Indirect prompt injection via search results now has a real, live-verified defense, closing a gap Chapter 8 named explicitly rather than solved. Basic accidental-PII exposure through the one free-text input is scrubbed before it's embedded or stored. Both are deliberately scoped narrow — Prompt Shields only wraps the one tool that touches untrusted external content, and PII scrubbing only covers two common accidental shapes, not a general classifier — matching this project's standing principle of putting a real, purpose-built tool exactly where a genuine risk exists, and nowhere else.

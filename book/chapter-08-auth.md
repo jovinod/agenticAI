@@ -355,6 +355,65 @@ Deciding *how* to constrain an agent is trust-boundary content, which is why it'
 
 **The gap this section flagged in advance turned out not to apply, checked directly rather than assumed.** The concern was real when it was written: any new tool either agent needed would run under `alpha-worker`'s one shared identity, able to touch Postgres/Redis/Service Bus regardless of what it actually needed, unless deliberately scoped down. Once both agents existed, checking their actual imports settled it — neither one touches `engine`, `Session`, `redis_client`, or `ServiceBusClient` at all. Decision's tools are yfinance (external, unauthenticated) and pure computation; Devil's Advocate's only tool is `search_web`, already Key-Vault-gated from Stage D. `alpha-worker` remains the only thing in this project with direct access to Postgres, Redis, and Service Bus — neither new agent needed to change that. The gap named here stays real *in general* — a future tool that genuinely needs direct data-store access would still raise it exactly as described — it just wasn't a debt these two specific agents took on. Worth the correction rather than leaving the earlier warning standing unchallenged once the real answer was known.
 
+## Azure Components Used This Chapter
+
+Two genuinely new resources across this chapter's five stages: the **Entra ID app registration** (Stage A — a real Client ID/Tenant ID and Service Principal, not just a config toggle, since Entra ID is the identity backbone every other stage's Managed Identity work builds on) and **Key Vault** (`alpha-research-kv`, Stage D — the one place a third-party secret with no Managed-Identity-native auth of its own, the Tavily key, actually lives). Everything else this chapter touches — Service Bus, Postgres, Redis, APIM — already existed; what changed for them was *how* they're authenticated to, not their existence.
+
+## The Architecture So Far
+
+The full cumulative state after all five stages — Entra ID and Key Vault are the two new boxes; every other edge that changed is a switch from a password/connection-string/SAS key to Managed Identity, called out in the edge label rather than with a separate node, the same "changed behavior, not a changed box" treatment Chapter 6 used for its own checkpoint edge.
+
+```mermaid
+flowchart TB
+    User(["Visitor's browser"])
+    SWA["Azure Static Web Apps<br/>React SPA"]
+    Entra["Microsoft Entra ID<br/>(sign-in + allow-list)"]
+    API["Container App: alpha-api<br/>FastAPI (external ingress)"]
+    SB["Service Bus: alpharesearchsb<br/>queues: research-jobs, embedding-jobs"]
+
+    subgraph WorkerGroup["Container App: alpha-worker<br/>KEDA-scaled: 1-10 replicas<br/>(1 replica per queued msg)"]
+        direction LR
+        W1["replica"]
+        W2["replica"]
+        Wdots["···<br/>up to 10"]
+    end
+
+    EmbedWorker["Container App: alpha-embed-worker<br/>KEDA-scaled: 0-3 replicas<br/>(1 replica per 5 queued msgs)"]
+
+    PG[("Postgres Flexible Server:<br/>alpha-research-pg<br/>+ tokenusage, tickerprofile,<br/>researchreport, checkpoints (pgvector + LangGraph)")]
+    Redis[("Managed Redis:<br/>alpha-research-cache<br/>per-ticker cache")]
+    APIM["API Management: alpha-research-apim<br/>(Consumption tier, managed identity)"]
+    OpenAI["Azure OpenAI: alpha-research-openai<br/>(South India) — gpt-5-mini,<br/>text-embedding-3-small"]
+    KeyVault[("Key Vault: alpha-research-kv<br/>(Tavily API key)")]
+
+    User --> SWA
+    SWA -->|"HTTPS + Bearer JWT, Stage A"| API
+    API -.->|"validate token, Stage A"| Entra
+    API -->|"send job (Managed Identity), Stage B"| SB
+    SB -->|deliver job, one per replica| WorkerGroup
+    SB -->|deliver report text| EmbedWorker
+    API -->|"read status (Managed Identity), Stage B"| PG
+    WorkerGroup -->|"write status/result/token-cost (Managed Identity)"| PG
+    WorkerGroup -->|"checkpoint check + write per super-step"| PG
+    EmbedWorker -->|"write report + vector (Managed Identity)"| PG
+    API -->|"search: read + embed query"| PG
+    API -->|"cache check (Managed Identity), Stage C"| Redis
+    WorkerGroup -->|"cache write (Managed Identity)"| Redis
+    WorkerGroup -->|"Ocp-Apim-Subscription-Key<br/>(the one remaining static secret)"| APIM
+    WorkerGroup -->|publish report text| SB
+    EmbedWorker -->|"Ocp-Apim-Subscription-Key"| APIM
+    API -->|"Ocp-Apim-Subscription-Key"| APIM
+    APIM -->|"managed identity (AAD token)"| OpenAI
+    WorkerGroup -->|"fetch Tavily key<br/>(Managed Identity), Stage D"| KeyVault
+
+    classDef existing fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    classDef new fill:#69f0ae,stroke:#00c853,stroke-width:3px,color:#004d26
+    classDef replica fill:#e8f5e9,stroke:#66bb6a,stroke-width:1px,color:#2e7d32
+    class User,SWA,API,SB,PG,Redis,OpenAI,APIM,EmbedWorker,WorkerGroup existing
+    class Entra,KeyVault new
+    class W1,W2,Wdots replica
+```
+
 ## Where This Stands
 
 All five stages of Phase 8 are complete. Every one of `alpha-api`, `alpha-worker`, and `alpha-embed-worker`'s connections — to Entra ID, Service Bus, Postgres, Redis, and the one third-party secret this app depends on — run on real Azure identity or Key Vault instead of a long-lived plaintext credential, access-key/password authentication is switched off entirely at the resource level for all three data stores, and the trust boundary is written down honestly, limitations included. Section F adds a checklist for the layer this project's own trust boundary doesn't yet cover in depth — constraining agents specifically, not just the services hosting them — checked point-by-point against what's actually built rather than presented as already solved. Items remain deliberately open, tracked rather than hidden: the Redis OSS Cluster routing gap from Stage C, the two named service-level limitations (no network isolation, one remaining static APIM key), and Section F.2's/F.6's named agent-level gaps (shared identity beyond what a specific tool needs; no direct defense against untrusted tool-result content) — all real, all known, none silently left for someone to discover later.
