@@ -1,0 +1,7 @@
+[project]
+name = "stock-research-assistant-worker"
+version = "0.1.0"
+description = "Stock Research Assistant -- background worker"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []

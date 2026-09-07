@@ -1,17 +1,26 @@
+import os
+import tempfile
 import unittest
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 import main
+from job_store import JobStore
 from main import app
 
 
 class TestResearchContract(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.original_store = main.store
+        main.store = JobStore(self.db_path)
 
-    @patch.object(main, "JOB_DELAY_SECONDS", 0)
+    def tearDown(self) -> None:
+        main.store = self.original_store
+        os.remove(self.db_path)
+
     def test_create_and_read_research_job(self) -> None:
         response = self.client.post(
             "/research",
@@ -22,7 +31,8 @@ class TestResearchContract(unittest.TestCase):
         job_id = response.json()["job_id"]
 
         status_response = self.client.get(f"/research/{job_id}")
-        self.assertEqual(status_response.json()["status"], "done")
+        self.assertEqual(status_response.json()["status"], "queued")
+        self.assertIsNone(status_response.json()["result"])
 
     def test_rejects_malformed_tickers(self) -> None:
         response = self.client.post(
@@ -41,18 +51,6 @@ class TestResearchContract(unittest.TestCase):
         response = self.client.get("/research/does-not-exist")
 
         self.assertEqual(response.status_code, 404)
-
-    def test_job_reports_running_before_its_deadline(self) -> None:
-        response = self.client.post(
-            "/research",
-            json={"tickers": ["AAPL"]},
-        )
-        job_id = response.json()["job_id"]
-
-        status_response = self.client.get(f"/research/{job_id}")
-
-        self.assertEqual(status_response.json()["status"], "running")
-        self.assertIsNone(status_response.json()["result"])
 
 
 if __name__ == "__main__":

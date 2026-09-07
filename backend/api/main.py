@@ -1,4 +1,4 @@
-import time
+import os
 import uuid
 from typing import Any
 
@@ -6,7 +6,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
-app = FastAPI()
+from job_store import JobStore
+
+DATABASE_PATH = os.getenv("DATABASE_PATH", "jobs.db")
+ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173")
+
+app = FastAPI(title="Stock Research API")
+store = JobStore(DATABASE_PATH)
 
 # CORS is a browser-facing access rule, not authentication -- it only
 # controls which origins a browser will let JavaScript read a response
@@ -15,20 +21,10 @@ app = FastAPI()
 # block every request.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[ALLOWED_ORIGIN],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Intentionally temporary: a real deadline in a real Chapter 3 worker
-# doesn't exist yet, so this stands in for "the work is still running."
-JOB_DELAY_SECONDS = 2.0
-
-# Intentionally temporary: process-local, in-memory job storage. It lets
-# the status route look a job up by ID without introducing a database
-# before that responsibility is actually needed. Every job disappears if
-# this process restarts -- Chapter 3 replaces this with PostgreSQL.
-jobs: dict[str, dict[str, Any]] = {}
 
 
 class ResearchRequest(BaseModel):
@@ -46,26 +42,14 @@ class ResearchRequest(BaseModel):
 @app.post("/research", status_code=202)
 async def create_research(request: ResearchRequest) -> dict[str, str]:
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {
-        "status": "running",
-        "tickers": request.tickers,
-        "ready_at": time.monotonic() + JOB_DELAY_SECONDS,
-    }
+    store.create_job(job_id, request.tickers)
     return {"job_id": job_id, "status": "accepted"}
 
 
 @app.get("/research/{job_id}")
 async def get_research(job_id: str) -> dict[str, Any]:
-    job = jobs.get(job_id)
+    job = store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
 
-    if time.monotonic() < job["ready_at"]:
-        return {"status": "running", "result": None}
-
-    result = {
-        "summary": [
-            f"{ticker}: looks solid, no major red flags." for ticker in job["tickers"]
-        ],
-    }
-    return {"status": "done", "result": result}
+    return {"status": job["status"], "result": job["result"]}
