@@ -1,0 +1,15 @@
+[project]
+name = "stock-research-assistant-api"
+version = "0.1.0"
+description = "Stock Research Assistant -- backend API"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

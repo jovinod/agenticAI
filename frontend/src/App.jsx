@@ -1,6 +1,14 @@
 import { useState } from 'react'
 import './App.css'
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
+// Bounded polling: the frontend checks at most this many times, waiting
+// this long between checks. Waiting must have a defined end -- the exact
+// numbers are a temporary policy choice, not a load-bearing contract.
+const MAX_POLL_ATTEMPTS = 20
+const POLL_INTERVAL_MS = 500
+
 function App() {
   const [tickerInput, setTickerInput] = useState('')
   const [tickers, setTickers] = useState([])
@@ -8,7 +16,44 @@ function App() {
   const [status, setStatus] = useState('idle') // 'idle' | 'loading' | 'done'
   const [report, setReport] = useState(null)
 
-  function handleSubmit() {
+  async function pollJob(jobId) {
+    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+
+      let response
+      try {
+        response = await fetch(`${API_URL}/research/${jobId}`)
+      } catch (err) {
+        setError('Lost connection to the server while waiting for results.')
+        setStatus('idle')
+        return
+      }
+
+      if (!response.ok) {
+        setError(`The API returned ${response.status}.`)
+        setStatus('idle')
+        return
+      }
+
+      const job = await response.json()
+
+      if (job.status === 'done') {
+        setReport({ jobId, ...job.result })
+        setStatus('done')
+        return
+      }
+      if (job.status === 'failed') {
+        setError('The research job failed.')
+        setStatus('idle')
+        return
+      }
+    }
+
+    setError('The research job took too long.')
+    setStatus('idle')
+  }
+
+  async function handleSubmit() {
     const parsed = tickerInput
       .split(',')
       .map((t) => t.trim().toUpperCase())
@@ -29,14 +74,27 @@ function App() {
     setTickers(parsed)
     setStatus('loading')
 
-    const jobId = crypto.randomUUID()
-    setTimeout(() => {
-      setReport({
-        jobId,
-        summary: parsed.map((t) => `${t}: looks solid, no major red flags.`),
+    let response
+    try {
+      response = await fetch(`${API_URL}/research`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers: parsed }),
       })
-      setStatus('done')
-    }, 2000)
+    } catch (err) {
+      setError('Could not reach the server. Check your connection and try again.')
+      setStatus('idle')
+      return
+    }
+
+    if (!response.ok) {
+      setError(`The API returned ${response.status}.`)
+      setStatus('idle')
+      return
+    }
+
+    const { job_id } = await response.json()
+    await pollJob(job_id)
   }
 
   function handleReset() {
