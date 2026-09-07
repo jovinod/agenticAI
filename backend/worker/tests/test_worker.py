@@ -1,36 +1,50 @@
 import asyncio
-import os
-import tempfile
 import unittest
 
-from job_store import JobStore
-from worker import process_next_job
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine, select
+
+import worker
+from models import Job
 
 
 class TestWorker(unittest.TestCase):
     def setUp(self) -> None:
-        fd, self.path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        self.store = JobStore(self.path)
+        worker.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(worker.engine)
 
-    def tearDown(self) -> None:
-        os.remove(self.path)
+        with Session(worker.engine) as session:
+            session.add(Job(job_id="job-1", tickers='["AAPL"]'))
+            session.commit()
 
-    def test_process_next_job_completes_a_queued_job(self) -> None:
-        self.store.create_job("job-1", ["AAPL"])
+    def test_process_message_completes_the_job(self) -> None:
+        asyncio.run(worker.process_message("job-1", ["AAPL"], delay_seconds=0))
 
-        claimed = asyncio.run(process_next_job(self.store, delay_seconds=0))
+        with Session(worker.engine) as session:
+            job = session.exec(select(Job).where(Job.job_id == "job-1")).first()
 
-        self.assertTrue(claimed)
-        job = self.store.get_job("job-1")
-        self.assertEqual(job["status"], "done")
-        self.assertEqual(job["result"]["jobId"], "job-1")
-        self.assertIn("AAPL", job["result"]["summary"][0])
+        self.assertEqual(job.status, "done")
+        self.assertIn("AAPL", job.result)
 
-    def test_process_next_job_returns_false_when_queue_is_empty(self) -> None:
-        claimed = asyncio.run(process_next_job(self.store, delay_seconds=0))
+    def test_process_message_marks_the_job_running_first(self) -> None:
+        async def observe_mid_flight() -> str:
+            task = asyncio.create_task(
+                worker.process_message("job-1", ["AAPL"], delay_seconds=0.05)
+            )
+            await asyncio.sleep(0.01)
+            with Session(worker.engine) as session:
+                mid_flight = session.exec(
+                    select(Job).where(Job.job_id == "job-1")
+                ).first()
+            await task
+            return mid_flight.status
 
-        self.assertFalse(claimed)
+        status = asyncio.run(observe_mid_flight())
+        self.assertEqual(status, "running")
 
 
 if __name__ == "__main__":

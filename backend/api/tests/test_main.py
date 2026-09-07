@@ -1,25 +1,60 @@
 import os
-import tempfile
 import unittest
 
+os.environ.setdefault(
+    "SERVICEBUS_CONNECTION_STRING",
+    "Endpoint=sb://fake.servicebus.windows.net/;"
+    "SharedAccessKeyName=fake;SharedAccessKey=ZmFrZQ==",
+)
+
 from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, create_engine
 
 import main
-from job_store import JobStore
-from main import app
+
+
+class FakeSender:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def __aenter__(self) -> "FakeSender":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+    async def send_messages(self, message: object) -> None:
+        self.sent.append(str(message))
+
+
+class FakeServiceBusClient:
+    def __init__(self) -> None:
+        self.sender = FakeSender()
+
+    def get_queue_sender(self, queue_name: str) -> FakeSender:
+        return self.sender
+
+    async def close(self) -> None:
+        pass
 
 
 class TestResearchContract(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = TestClient(app)
-        fd, self.db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        self.original_store = main.store
-        main.store = JobStore(self.db_path)
+        main.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(main.engine)
+
+        self.client = TestClient(main.app)
+        self.client.__enter__()
+        self.fake_servicebus = FakeServiceBusClient()
+        main.app.state.servicebus_client = self.fake_servicebus
 
     def tearDown(self) -> None:
-        main.store = self.original_store
-        os.remove(self.db_path)
+        self.client.__exit__(None, None, None)
 
     def test_create_and_read_research_job(self) -> None:
         response = self.client.post(
@@ -28,8 +63,9 @@ class TestResearchContract(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 202)
-        job_id = response.json()["job_id"]
+        self.assertEqual(len(self.fake_servicebus.sender.sent), 1)
 
+        job_id = response.json()["job_id"]
         status_response = self.client.get(f"/research/{job_id}")
         self.assertEqual(status_response.json()["status"], "queued")
         self.assertIsNone(status_response.json()["result"])
@@ -41,6 +77,7 @@ class TestResearchContract(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+        self.assertEqual(len(self.fake_servicebus.sender.sent), 0)
 
     def test_rejects_empty_ticker_list(self) -> None:
         response = self.client.post("/research", json={"tickers": []})

@@ -1,43 +1,65 @@
 import asyncio
+import json
 import os
 
-from job_store import JobStore
+from azure.servicebus.aio import ServiceBusClient
+from sqlmodel import Session, SQLModel, create_engine, select
 
-DATABASE_PATH = os.getenv("DATABASE_PATH", "jobs.db")
-POLL_INTERVAL_SECONDS = 0.5
+from models import Job
+
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
+)
+SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
+SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
+
+engine = create_engine(DATABASE_URL)
+SQLModel.metadata.create_all(engine)
 
 # Intentionally temporary: stands in for real research work. Chapter 4
 # replaces this with an actual market-data call.
 JOB_DELAY_SECONDS = 2.0
 
 
-async def process_next_job(
-    store: JobStore,
+async def process_message(
+    job_id: str,
+    tickers: list[str],
     delay_seconds: float = JOB_DELAY_SECONDS,
-) -> bool:
-    job = store.claim_next_job()
-    if job is None:
-        return False
+) -> None:
+    with Session(engine) as session:
+        job = session.exec(select(Job).where(Job.job_id == job_id)).first()
+        job.status = "running"
+        session.add(job)
+        session.commit()
 
     await asyncio.sleep(delay_seconds)
+
     result = {
-        "jobId": job["job_id"],
+        "jobId": job_id,
         "summary": [
-            f"{ticker}: sample result from the Chapter 3 worker."
-            for ticker in job["tickers"]
+            f"{ticker}: sample result from the Chapter 3 worker." for ticker in tickers
         ],
     }
-    store.complete_job(job["job_id"], result)
-    return True
+
+    with Session(engine) as session:
+        job = session.exec(select(Job).where(Job.job_id == job_id)).first()
+        job.status = "done"
+        job.result = json.dumps(result)
+        session.add(job)
+        session.commit()
 
 
 async def main() -> None:
-    store = JobStore(DATABASE_PATH)
-    print("Worker started, polling for queued jobs...")
-    while True:
-        claimed = await process_next_job(store)
-        if not claimed:
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
+    async with client:
+        async with client.get_queue_receiver(
+            queue_name=SERVICEBUS_QUEUE_NAME
+        ) as receiver:
+            print("Worker started, waiting for messages...")
+            async for message in receiver:
+                data = json.loads(str(message))
+                await process_message(data["job_id"], data["tickers"])
+                await receiver.complete_message(message)
 
 
 if __name__ == "__main__":

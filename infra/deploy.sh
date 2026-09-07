@@ -13,7 +13,19 @@ set -euo pipefail
 
 PARAMS_FILE="${1:?Usage: deploy.sh <params-file> [resource-group]}"
 RESOURCE_GROUP="${2:-stock-research-book-rg}"
-TEMPLATE_FILE="$(dirname "$0")/main.bicep"
+INFRA_DIR="$(dirname "$0")"
+TEMPLATE_FILE="$INFRA_DIR/main.bicep"
+
+# Chapter 3 onward: Postgres needs an administrator password. It's a
+# @secure() parameter, so it never lives in the checked-in params file --
+# generate one on first use and reuse it from a local, gitignored file for
+# every later deployment in this test run.
+PASSWORD_FILE="$INFRA_DIR/.postgres-admin-password"
+if [ ! -f "$PASSWORD_FILE" ]; then
+  echo "$(openssl rand -hex 12)Aa1!" > "$PASSWORD_FILE"
+  chmod 600 "$PASSWORD_FILE"
+fi
+POSTGRES_ADMIN_PASSWORD="$(cat "$PASSWORD_FILE")"
 
 echo "Deploying $PARAMS_FILE to resource group $RESOURCE_GROUP..."
 
@@ -21,4 +33,5 @@ az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
   --template-file "$TEMPLATE_FILE" \
   --parameters "@$PARAMS_FILE" \
+  --parameters postgresAdminPassword="$POSTGRES_ADMIN_PASSWORD" \
   --output table
