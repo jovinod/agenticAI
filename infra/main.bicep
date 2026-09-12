@@ -268,6 +268,10 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
           name: 'tavily-api-key'
           value: tavilyApiKey
         }
+        {
+          name: 'apim-subscription-key'
+          value: deployApim ? apimSubscription!.listSecrets().primaryKey : ''
+        }
       ]
     }
     template: {
@@ -275,11 +279,19 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
         {
           name: 'worker'
           image: workerImage
-          env: [
-            { name: 'DATABASE_URL', secretRef: 'database-url' }
-            { name: 'SERVICEBUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
-            { name: 'TAVILY_API_KEY', secretRef: 'tavily-api-key' }
-          ]
+          env: concat(
+            [
+              { name: 'DATABASE_URL', secretRef: 'database-url' }
+              { name: 'SERVICEBUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
+              { name: 'TAVILY_API_KEY', secretRef: 'tavily-api-key' }
+            ],
+            deployApim
+              ? [
+                  { name: 'APIM_BASE_URL', value: apim!.properties.gatewayUrl }
+                  { name: 'APIM_SUBSCRIPTION_KEY', secretRef: 'apim-subscription-key' }
+                ]
+              : []
+          )
         }
       ]
       scale: {
@@ -293,3 +305,189 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
 output postgresHostname string = deployPostgres ? postgres!.properties.fullyQualifiedDomainName : ''
 output containerRegistryLoginServer string = deployContainerRegistry ? containerRegistry!.properties.loginServer : ''
 output apiFqdn string = deployContainerApps ? apiApp!.properties.configuration.ingress.fqdn : ''
+
+// ---------------------------------------------------------------------
+// Chapter 7: a hosted model deployment (Azure OpenAI / Microsoft
+// Foundry) behind Azure API Management, which authenticates to the
+// model with its own managed identity rather than an embedded key.
+// ---------------------------------------------------------------------
+
+@description('Chapter 7: hosted chat model deployment.')
+param deployFoundryModel bool = false
+
+@description('Chapter 9: hosted embedding model deployment. Uses the same OpenAI account as deployFoundryModel.')
+param deployFoundryEmbedding bool = false
+
+@description('Chapter 7: API Management gateway in front of the model deployment.')
+param deployApim bool = false
+
+@description('Publisher email required by API Management. Required when deployApim is true.')
+param apimPublisherEmail string = ''
+
+@description('Azure region for the OpenAI account -- GlobalStandard model availability varies by region independently of where other resources live.')
+param foundryLocation string = 'southindia'
+
+resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (deployFoundryModel) {
+  name: '${namePrefix}-openai'
+  location: foundryLocation
+  kind: 'OpenAI'
+  sku: {
+    name: 'S0'
+  }
+  properties: {
+    customSubDomainName: '${namePrefix}-openai-${uniqueSuffix}'
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = if (deployFoundryModel) {
+  parent: openAiAccount
+  name: 'chat'
+  sku: {
+    name: 'GlobalStandard'
+    capacity: 10
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: 'gpt-5-mini'
+      version: '2025-08-07'
+    }
+  }
+}
+
+resource embedDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = if (deployFoundryEmbedding) {
+  parent: openAiAccount
+  name: 'embed'
+  sku: {
+    name: 'GlobalStandard'
+    capacity: 10
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: 'text-embedding-3-small'
+      version: '1'
+    }
+  }
+  dependsOn: [
+    chatDeployment
+  ]
+}
+
+resource apim 'Microsoft.ApiManagement/service@2023-05-01-preview' = if (deployApim) {
+  name: '${namePrefix}-apim-${uniqueSuffix}'
+  location: location
+  sku: {
+    name: 'Consumption'
+    capacity: 0
+  }
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    publisherEmail: apimPublisherEmail
+    publisherName: 'Stock Research Book'
+  }
+}
+
+// Lets APIM's own managed identity call the model deployment -- the
+// worker holds an APIM subscription key, never an OpenAI account key.
+resource openAiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployApim && deployFoundryModel) {
+  name: guid(openAiAccount.id, apim.id, 'CognitiveServicesOpenAIUser')
+  scope: openAiAccount
+  properties: {
+    principalId: apim!.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+    )
+  }
+}
+
+resource openAiApi 'Microsoft.ApiManagement/service/apis@2023-05-01-preview' = if (deployApim) {
+  parent: apim
+  name: 'openai'
+  properties: {
+    displayName: 'OpenAI'
+    path: 'openai'
+    protocols: ['https']
+    serviceUrl: deployFoundryModel ? '${openAiAccount!.properties.endpoint}openai' : ''
+    subscriptionRequired: true
+  }
+}
+
+resource openAiApiPassthrough 'Microsoft.ApiManagement/service/apis/operations@2023-05-01-preview' = if (deployApim) {
+  parent: openAiApi
+  name: 'passthrough'
+  properties: {
+    displayName: 'Passthrough'
+    method: 'POST'
+    urlTemplate: '/*'
+  }
+}
+
+resource openAiApiPolicy 'Microsoft.ApiManagement/service/apis/policies@2023-05-01-preview' = if (deployApim) {
+  parent: openAiApi
+  name: 'policy'
+  properties: {
+    format: 'xml'
+    value: '''
+      <policies>
+        <inbound>
+          <base />
+          <authentication-managed-identity resource="https://cognitiveservices.azure.com" output-token-variable-name="msi-access-token" ignore-error="false" />
+          <set-header name="Authorization" exists-action="override">
+            <value>@("Bearer " + (string)context.Variables["msi-access-token"])</value>
+          </set-header>
+          <set-header name="api-key" exists-action="delete" />
+        </inbound>
+        <backend>
+          <base />
+        </backend>
+        <outbound>
+          <base />
+        </outbound>
+        <on-error>
+          <base />
+        </on-error>
+      </policies>
+    '''
+  }
+  dependsOn: [
+    openAiApiPassthrough
+  ]
+}
+
+resource apimProduct 'Microsoft.ApiManagement/service/products@2023-05-01-preview' = if (deployApim) {
+  parent: apim
+  name: 'openai-product'
+  properties: {
+    displayName: 'OpenAI'
+    subscriptionRequired: true
+    state: 'published'
+  }
+}
+
+resource apimProductApi 'Microsoft.ApiManagement/service/products/apis@2023-05-01-preview' = if (deployApim) {
+  parent: apimProduct
+  name: 'openai'
+  dependsOn: [
+    openAiApi
+  ]
+}
+
+resource apimSubscription 'Microsoft.ApiManagement/service/subscriptions@2023-05-01-preview' = if (deployApim) {
+  parent: apim
+  name: 'worker-subscription'
+  properties: {
+    scope: apimProduct!.id
+    displayName: 'Worker subscription'
+    state: 'active'
+  }
+}
+
+output apimGatewayUrl string = deployApim ? apim!.properties.gatewayUrl : ''
+#disable-next-line outputs-should-not-contain-secrets
+output apimSubscriptionKey string = deployApim ? apimSubscription!.listSecrets().primaryKey : ''
