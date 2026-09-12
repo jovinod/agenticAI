@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
+from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -19,6 +20,11 @@ FAKE_STOCK_DATA = {
 
 
 class TestWorker(unittest.TestCase):
+    async def _fake_get_checkpointer(self):
+        if not hasattr(self, "_checkpointer"):
+            self._checkpointer = InMemorySaver()
+        return self._checkpointer
+
     def setUp(self) -> None:
         worker.engine = create_engine(
             "sqlite://",
@@ -30,6 +36,16 @@ class TestWorker(unittest.TestCase):
         with Session(worker.engine) as session:
             session.add(Job(job_id="job-1", tickers='["AAPL"]'))
             session.commit()
+
+        # A fresh in-memory checkpointer per test, and a fresh graph built
+        # against it -- the module-level cache would otherwise leak a
+        # prior test's checkpointer into this one.
+        worker.research_graph = None
+        checkpointer_patcher = patch(
+            "worker.get_checkpointer", side_effect=self._fake_get_checkpointer
+        )
+        self.addCleanup(checkpointer_patcher.stop)
+        checkpointer_patcher.start()
 
         market_patcher = patch("graph.fetch_stock_data", return_value=FAKE_STOCK_DATA)
         self.addCleanup(market_patcher.stop)

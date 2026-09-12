@@ -238,12 +238,16 @@ async def decision_node(state: ResearchState) -> dict:
     }
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     """The chapter-stage topology: a memory node records and recalls
     context, then three independent specialists fan out, converge on
     Risk, then Risk feeds Devil's Advocate, then Decision -- Synthesizer
     is removed, not retained beside them, so only one component ever
-    owns the final report."""
+    owns the final report.
+
+    A checkpointer makes every super-step durable: a worker crash mid-run
+    and a resume with the same thread ID does not repeat completed nodes.
+    """
     builder = StateGraph(ResearchState)
     builder.add_node("memory", memory_node)
     builder.add_node("fundamentals", fundamentals_node)
@@ -266,4 +270,4 @@ def build_graph():
     builder.add_edge("devil_advocate", "decision")
     builder.add_edge("decision", END)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)

@@ -5,8 +5,10 @@ import os
 from azure.servicebus.aio import ServiceBusClient
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from checkpointing import get_checkpointer
 from graph import build_graph
 from models import Job
+from thread import build_thread_id, resolve_resume_input
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
@@ -22,11 +24,28 @@ SQLModel.metadata.create_all(engine)
 JOB_DELAY_SECONDS = 2.0
 
 
-research_graph = build_graph()
+research_graph = None
+
+
+async def get_research_graph():
+    """Built once, lazily, on first use -- constructing it needs a real
+    async connection to Postgres for the checkpointer, which module
+    import time cannot provide."""
+    global research_graph
+    if research_graph is None:
+        checkpointer = await get_checkpointer()
+        research_graph = build_graph(checkpointer)
+    return research_graph
 
 
 async def summarize_ticker(ticker: str, job_id: str) -> str:
-    state = await research_graph.ainvoke({"ticker": ticker, "job_id": job_id})
+    graph = await get_research_graph()
+    checkpointer = await get_checkpointer()
+    thread_id = build_thread_id(job_id, ticker)
+    resume_input, config = await resolve_resume_input(
+        checkpointer, thread_id, {"ticker": ticker, "job_id": job_id}
+    )
+    state = await graph.ainvoke(resume_input, config)
     return f"{ticker} [{state.get('recommendation', 'N/A')}]: {state['final_report']}"
 
 
