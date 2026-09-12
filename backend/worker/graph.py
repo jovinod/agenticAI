@@ -3,6 +3,7 @@ import time
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import RetryPolicy
 
 from typing import Any
 
@@ -247,15 +248,23 @@ def build_graph(checkpointer=None):
 
     A checkpointer makes every super-step durable: a worker crash mid-run
     and a resume with the same thread ID does not repeat completed nodes.
+
+    Every node carries a real RetryPolicy. Unlike the chapter's own
+    documented gap -- a broad try/except inside each node that returns
+    degraded state before LangGraph's retry policy ever sees the
+    exception -- these node bodies only catch conditions they can name
+    (a ticker not found, a search provider down) and let everything else
+    escape, so a real transient failure (a dropped connection, a 5xx from
+    the model gateway) is a real retry, not a silently swallowed one.
     """
     builder = StateGraph(ResearchState)
-    builder.add_node("memory", memory_node)
-    builder.add_node("fundamentals", fundamentals_node)
-    builder.add_node("technical", technical_node)
-    builder.add_node("news", news_node)
-    builder.add_node("risk", risk_node)
-    builder.add_node("devil_advocate", devil_advocate_node)
-    builder.add_node("decision", decision_node)
+    builder.add_node("memory", memory_node, retry_policy=RetryPolicy())
+    builder.add_node("fundamentals", fundamentals_node, retry_policy=RetryPolicy())
+    builder.add_node("technical", technical_node, retry_policy=RetryPolicy())
+    builder.add_node("news", news_node, retry_policy=RetryPolicy())
+    builder.add_node("risk", risk_node, retry_policy=RetryPolicy())
+    builder.add_node("devil_advocate", devil_advocate_node, retry_policy=RetryPolicy())
+    builder.add_node("decision", decision_node, retry_policy=RetryPolicy())
 
     builder.add_edge(START, "memory")
     builder.add_edge("memory", "fundamentals")

@@ -6,6 +6,7 @@ from azure.servicebus.aio import ServiceBusClient
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from checkpointing import get_checkpointer
+from containment import run_ticker_safely
 from graph import build_graph
 from models import Job
 from thread import build_thread_id, resolve_resume_input
@@ -38,7 +39,7 @@ async def get_research_graph():
     return research_graph
 
 
-async def summarize_ticker(ticker: str, job_id: str) -> str:
+async def _run_graph_for_ticker(ticker: str, job_id: str) -> str:
     graph = await get_research_graph()
     checkpointer = await get_checkpointer()
     thread_id = build_thread_id(job_id, ticker)
@@ -47,6 +48,14 @@ async def summarize_ticker(ticker: str, job_id: str) -> str:
     )
     state = await graph.ainvoke(resume_input, config)
     return f"{ticker} [{state.get('recommendation', 'N/A')}]: {state['final_report']}"
+
+
+async def summarize_ticker(ticker: str, job_id: str) -> str:
+    """Each node already carries a RetryPolicy for transient failures;
+    this is the containment boundary for what happens after retries are
+    exhausted -- one ticker degrades to an explicit unavailable line
+    rather than taking down the rest of the job."""
+    return await run_ticker_safely(ticker, lambda: _run_graph_for_ticker(ticker, job_id))
 
 
 async def process_message(
@@ -75,6 +84,17 @@ async def process_message(
         session.commit()
 
 
+async def _mark_job_failed(job_id: str, exc: Exception) -> None:
+    with Session(engine) as session:
+        job = session.exec(select(Job).where(Job.job_id == job_id)).first()
+        if job is None:
+            return
+        job.status = "failed"
+        job.result = json.dumps({"jobId": job_id, "error": str(exc)})
+        session.add(job)
+        session.commit()
+
+
 async def main() -> None:
     client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
     async with client:
@@ -84,7 +104,15 @@ async def main() -> None:
             print("Worker started, waiting for messages...")
             async for message in receiver:
                 data = json.loads(str(message))
-                await process_message(data["job_id"], data["tickers"])
+                # A per-ticker failure is already contained inside
+                # process_message; this catches something unexpected
+                # enough to reach here (e.g. a DB write failure) so one
+                # bad job marks itself failed instead of killing the
+                # receive loop for every job after it.
+                try:
+                    await process_message(data["job_id"], data["tickers"])
+                except Exception as exc:
+                    await _mark_job_failed(data["job_id"], exc)
                 await receiver.complete_message(message)
 
 

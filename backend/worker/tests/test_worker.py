@@ -108,6 +108,29 @@ class TestWorker(unittest.TestCase):
         self.assertEqual(job.status, "done")
         self.assertIn("AAPL", job.result)
 
+    def test_a_permanently_failing_ticker_does_not_block_the_others(self) -> None:
+        with Session(worker.engine) as session:
+            session.add(Job(job_id="job-2", tickers='["AAPL", "BADCO"]'))
+            session.commit()
+
+        real_run = worker._run_graph_for_ticker
+
+        async def flaky_run(ticker: str, job_id: str) -> str:
+            if ticker == "BADCO":
+                raise RuntimeError("exhausted retries")
+            return await real_run(ticker, job_id)
+
+        with patch("worker._run_graph_for_ticker", side_effect=flaky_run):
+            asyncio.run(worker.process_message("job-2", ["AAPL", "BADCO"], delay_seconds=0))
+
+        with Session(worker.engine) as session:
+            job = session.exec(select(Job).where(Job.job_id == "job-2")).first()
+
+        self.assertEqual(job.status, "done")
+        self.assertIn("AAPL", job.result)
+        self.assertIn("BADCO", job.result)
+        self.assertIn("unavailable", job.result)
+
     def test_process_message_marks_the_job_running_first(self) -> None:
         async def observe_mid_flight() -> str:
             task = asyncio.create_task(
