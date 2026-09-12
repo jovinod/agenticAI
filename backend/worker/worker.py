@@ -25,8 +25,8 @@ JOB_DELAY_SECONDS = 2.0
 research_graph = build_graph()
 
 
-async def summarize_ticker(ticker: str) -> str:
-    state = await research_graph.ainvoke({"ticker": ticker})
+async def summarize_ticker(ticker: str, job_id: str) -> str:
+    state = await research_graph.ainvoke({"ticker": ticker, "job_id": job_id})
     return f"{ticker}: {state['final_report']}"
 
 
@@ -45,7 +45,7 @@ async def process_message(
 
     result = {
         "jobId": job_id,
-        "summary": [await summarize_ticker(ticker) for ticker in tickers],
+        "summary": [await summarize_ticker(ticker, job_id) for ticker in tickers],
     }
 
     with Session(engine) as session:

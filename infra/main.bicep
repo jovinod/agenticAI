@@ -272,6 +272,10 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
           name: 'apim-subscription-key'
           value: deployApim ? apimSubscription!.listSecrets().primaryKey : ''
         }
+        {
+          name: 'redis-url'
+          value: deployRedis ? 'rediss://:${redisDatabase!.listKeys().primaryKey}@${redisEnterprise!.properties.hostName}:10000' : ''
+        }
       ]
     }
     template: {
@@ -284,13 +288,15 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
               { name: 'DATABASE_URL', secretRef: 'database-url' }
               { name: 'SERVICEBUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
               { name: 'TAVILY_API_KEY', secretRef: 'tavily-api-key' }
+              { name: 'SERVICEBUS_EMBEDDING_QUEUE_NAME', value: 'embedding-jobs' }
             ],
             deployApim
               ? [
                   { name: 'APIM_BASE_URL', value: apim!.properties.gatewayUrl }
                   { name: 'APIM_SUBSCRIPTION_KEY', secretRef: 'apim-subscription-key' }
                 ]
-              : []
+              : [],
+            deployRedis ? [{ name: 'REDIS_URL', secretRef: 'redis-url' }] : []
           )
         }
       ]
@@ -491,3 +497,122 @@ resource apimSubscription 'Microsoft.ApiManagement/service/subscriptions@2023-05
 output apimGatewayUrl string = deployApim ? apim!.properties.gatewayUrl : ''
 #disable-next-line outputs-should-not-contain-secrets
 output apimSubscriptionKey string = deployApim ? apimSubscription!.listSecrets().primaryKey : ''
+
+// ---------------------------------------------------------------------
+// Chapter 9: in-flight progress (Redis), the pgvector extension on the
+// existing Postgres server, an embedding delivery queue, and the
+// embed worker that consumes it.
+// ---------------------------------------------------------------------
+
+@description('Chapter 9: in-flight progress and the completed-result cache.')
+param deployRedis bool = false
+
+@description('Chapter 9: allow the vector extension on the existing Postgres server, for semantic report search.')
+param deployPgVector bool = false
+
+@description('Chapter 9: deliver completed reports to the embed worker.')
+param deployEmbeddingQueue bool = false
+
+@description('Chapter 9: host the embed worker as a container app.')
+param deployEmbedWorker bool = false
+
+@description('Embed worker container image. Required when deployEmbedWorker is true.')
+param embedWorkerImage string = ''
+
+// Classic Azure Cache for Redis is being retired -- Azure Managed
+// Redis (redisEnterprise) is the replacement, at its smallest SKU.
+resource redisEnterprise 'Microsoft.Cache/redisEnterprise@2025-07-01' = if (deployRedis) {
+  name: '${namePrefix}-redis'
+  location: location
+  sku: {
+    name: 'Balanced_B0'
+  }
+  properties: {
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-07-01' = if (deployRedis) {
+  parent: redisEnterprise
+  name: 'default'
+  properties: {
+    clusteringPolicy: 'OSSCluster'
+    evictionPolicy: 'NoEviction'
+    port: 10000
+    accessKeysAuthentication: 'Enabled'
+  }
+}
+
+// Enables `CREATE EXTENSION vector` on the database -- Postgres flexible
+// server requires the extension to be explicitly allow-listed first.
+resource pgVectorExtension 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2024-08-01' = if (deployPgVector) {
+  parent: postgres
+  name: 'azure.extensions'
+  properties: {
+    value: 'VECTOR'
+    source: 'user-override'
+  }
+}
+
+resource embeddingQueue 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' = if (deployEmbeddingQueue) {
+  parent: serviceBusNamespace
+  name: 'embedding-jobs'
+}
+
+resource embedWorkerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployEmbedWorker) {
+  name: '${namePrefix}-embed-worker'
+  location: location
+  properties: {
+    managedEnvironmentId: containerAppsEnvironment.id
+    configuration: {
+      registries: [
+        {
+          server: '${containerRegistry!.name}.azurecr.io'
+          username: containerRegistry!.listCredentials().username
+          passwordSecretRef: 'acr-password'
+        }
+      ]
+      secrets: [
+        {
+          name: 'acr-password'
+          value: containerRegistry!.listCredentials().passwords[0].value
+        }
+        {
+          name: 'database-url'
+          value: 'postgresql+psycopg://${postgresAdminLogin}:${postgresAdminPassword}@${postgres!.properties.fullyQualifiedDomainName}:5432/alpha'
+        }
+        {
+          name: 'servicebus-connection-string'
+          value: serviceBusSendListenRule!.listKeys().primaryConnectionString
+        }
+        {
+          name: 'apim-subscription-key'
+          value: deployApim ? apimSubscription!.listSecrets().primaryKey : ''
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'embed-worker'
+          image: embedWorkerImage
+          env: [
+            { name: 'DATABASE_URL', secretRef: 'database-url' }
+            { name: 'SERVICEBUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
+            { name: 'SERVICEBUS_EMBEDDING_QUEUE_NAME', value: 'embedding-jobs' }
+            { name: 'APIM_BASE_URL', value: deployApim ? apim!.properties.gatewayUrl : '' }
+            { name: 'APIM_SUBSCRIPTION_KEY', secretRef: 'apim-subscription-key' }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1
+      }
+    }
+  }
+}
+
+output redisHostname string = deployRedis ? redisEnterprise!.properties.hostName : ''
+#disable-next-line outputs-should-not-contain-secrets
+output redisAccessKey string = deployRedis ? redisDatabase!.listKeys().primaryKey : ''

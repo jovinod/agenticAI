@@ -52,6 +52,33 @@ class TestWorker(unittest.TestCase):
         self.addCleanup(chat_patcher.stop)
         chat_patcher.start()
 
+        record_patcher = patch("graph.record_research")
+        self.addCleanup(record_patcher.stop)
+        record_patcher.start()
+
+        async def fake_search_reports(query: str, limit: int = 5) -> list[dict]:
+            return []
+
+        prior_patcher = patch("graph.search_reports", side_effect=fake_search_reports)
+        self.addCleanup(prior_patcher.stop)
+        prior_patcher.start()
+
+        async def fake_write_progress(job_id, ticker, agent_name, summary) -> None:
+            return None
+
+        progress_patcher = patch("graph.write_progress", side_effect=fake_write_progress)
+        self.addCleanup(progress_patcher.stop)
+        progress_patcher.start()
+
+        async def fake_publish_embedding_job(job_id, ticker, market, report_text) -> None:
+            return None
+
+        publish_patcher = patch(
+            "graph.publish_embedding_job", side_effect=fake_publish_embedding_job
+        )
+        self.addCleanup(publish_patcher.stop)
+        publish_patcher.start()
+
     def test_process_message_completes_the_job(self) -> None:
         asyncio.run(worker.process_message("job-1", ["AAPL"], delay_seconds=0))
 
