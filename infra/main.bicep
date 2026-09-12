@@ -81,6 +81,10 @@ param workerImage string = ''
 @description('Value of the API\'s ALLOWED_ORIGIN setting. Required when deployContainerApps is true.')
 param allowedOrigin string = 'http://localhost:5173'
 
+@description('Chapter 5: real web-search tool credential, passed to the worker for its MCP search subprocess.')
+@secure()
+param tavilyApiKey string = ''
+
 resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = if (deployPostgres) {
   name: '${namePrefix}-pg'
   location: location
@@ -260,6 +264,10 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
           name: 'servicebus-connection-string'
           value: serviceBusSendListenRule!.listKeys().primaryConnectionString
         }
+        {
+          name: 'tavily-api-key'
+          value: tavilyApiKey
+        }
       ]
     }
     template: {
@@ -270,6 +278,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
           env: [
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'SERVICEBUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
+            { name: 'TAVILY_API_KEY', secretRef: 'tavily-api-key' }
           ]
         }
       ]

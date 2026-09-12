@@ -27,6 +27,11 @@ if [ ! -f "$PASSWORD_FILE" ]; then
 fi
 POSTGRES_ADMIN_PASSWORD="$(cat "$PASSWORD_FILE")"
 
+# Chapter 5 onward: the worker's real MCP search tool needs a Tavily
+# credential. Also a gitignored local file, never checked in.
+TAVILY_KEY_FILE="$INFRA_DIR/.tavily-api-key"
+TAVILY_API_KEY="$(cat "$TAVILY_KEY_FILE" 2>/dev/null || true)"
+
 echo "Deploying $PARAMS_FILE to resource group $RESOURCE_GROUP..."
 
 az deployment group create \
@@ -34,4 +39,5 @@ az deployment group create \
   --template-file "$TEMPLATE_FILE" \
   --parameters "@$PARAMS_FILE" \
   --parameters postgresAdminPassword="$POSTGRES_ADMIN_PASSWORD" \
+  --parameters tavilyApiKey="$TAVILY_API_KEY" \
   --output table

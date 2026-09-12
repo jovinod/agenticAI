@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "azure-servicebus>=7.14.0",
+    "mcp>=1.0.0",
     "psycopg[binary]>=3.2.0",
     "sqlmodel>=0.0.22",
+    "tavily-python>=0.5.0",
     "yfinance>=0.2.40",
 ]

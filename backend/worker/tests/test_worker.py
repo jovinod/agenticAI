@@ -31,9 +31,16 @@ class TestWorker(unittest.TestCase):
             session.add(Job(job_id="job-1", tickers='["AAPL"]'))
             session.commit()
 
-        patcher = patch("worker.fetch_stock_data", return_value=FAKE_STOCK_DATA)
-        self.addCleanup(patcher.stop)
-        patcher.start()
+        market_patcher = patch("worker.fetch_stock_data", return_value=FAKE_STOCK_DATA)
+        self.addCleanup(market_patcher.stop)
+        market_patcher.start()
+
+        async def fake_search(query: str, max_results: int = 5) -> list[str]:
+            return ['[{"title": "Fake headline", "url": "https://example.com"}]']
+
+        search_patcher = patch("worker.search_via_mcp", side_effect=fake_search)
+        self.addCleanup(search_patcher.stop)
+        search_patcher.start()
 
     def test_process_message_completes_the_job(self) -> None:
         asyncio.run(worker.process_message("job-1", ["AAPL"], delay_seconds=0))
