@@ -253,6 +253,9 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerAp
 resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApps) {
   name: '${namePrefix}-worker'
   location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
   properties: {
     managedEnvironmentId: containerAppsEnvironment.id
     configuration: {
@@ -298,7 +301,11 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
           env: concat(
             [
               { name: 'DATABASE_URL', secretRef: 'database-url' }
+              { name: 'DATABASE_HOST', value: deployPostgres ? postgres!.properties.fullyQualifiedDomainName : '' }
+              { name: 'DATABASE_NAME', value: 'alpha' }
+              { name: 'DATABASE_USER', value: 'stockresearch-worker' }
               { name: 'SERVICEBUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
+              { name: 'SERVICEBUS_FQDN', value: deployServiceBus ? '${serviceBusNamespace!.name}.servicebus.windows.net' : '' }
               { name: 'TAVILY_API_KEY', secretRef: 'tavily-api-key' }
               { name: 'SERVICEBUS_EMBEDDING_QUEUE_NAME', value: 'embedding-jobs' }
             ],
@@ -308,7 +315,8 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
                   { name: 'APIM_SUBSCRIPTION_KEY', secretRef: 'apim-subscription-key' }
                 ]
               : [],
-            deployRedis ? [{ name: 'REDIS_URL', secretRef: 'redis-url' }] : []
+            deployRedis ? [{ name: 'REDIS_URL', secretRef: 'redis-url' }] : [],
+            deployKeyVault ? [{ name: 'KEY_VAULT_URI', value: keyVault!.properties.vaultUri }] : []
           )
         }
       ]
@@ -628,3 +636,39 @@ resource embedWorkerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployEmb
 output redisHostname string = deployRedis ? redisEnterprise!.properties.hostName : ''
 #disable-next-line outputs-should-not-contain-secrets
 output redisAccessKey string = deployRedis ? redisDatabase!.listKeys().primaryKey : ''
+
+// ---------------------------------------------------------------------
+// Chapter 14: workload identity and secrets. The worker's own RBAC
+// (Key Vault, Service Bus queue roles) and its Postgres Entra role are
+// assigned imperatively, not here -- these are not reproducible from
+// repository infrastructure as code, the same real limitation the
+// original chapter documents. The vault resource and the worker's
+// managed identity itself are declared here.
+// ---------------------------------------------------------------------
+
+@description('Chapter 14: store the third-party Tavily API key for the search boundary, owned by Key Vault instead of a plain container secret.')
+param deployKeyVault bool = false
+
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = if (deployKeyVault) {
+  name: 'kv-${uniqueSuffix}'
+  location: location
+  properties: {
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    tenantId: subscription().tenantId
+    enableRbacAuthorization: true
+  }
+}
+
+resource tavilySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (deployKeyVault) {
+  parent: keyVault
+  name: 'tavily-api-key'
+  properties: {
+    value: tavilyApiKey
+  }
+}
+
+output keyVaultUri string = deployKeyVault ? keyVault!.properties.vaultUri : ''
+output keyVaultName string = deployKeyVault ? keyVault!.name : ''

@@ -1,10 +1,10 @@
 import json
 import os
 
-from azure.servicebus.aio import ServiceBusClient
 from azure.servicebus import ServiceBusMessage
 
-SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
+from servicebus_client import build_servicebus_client
+
 SERVICEBUS_EMBEDDING_QUEUE_NAME = os.environ.get(
     "SERVICEBUS_EMBEDDING_QUEUE_NAME", "embedding-jobs"
 )
@@ -26,7 +26,7 @@ async def publish_embedding_job(
             }
         )
     )
-    client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
+    client = build_servicebus_client()
     async with client:
         async with client.get_queue_sender(
             queue_name=SERVICEBUS_EMBEDDING_QUEUE_NAME

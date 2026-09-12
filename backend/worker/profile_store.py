@@ -1,14 +1,9 @@
 import datetime
-import os
 from typing import Optional
 
-from sqlmodel import Field, Session, SQLModel, UniqueConstraint, create_engine, select
+from sqlmodel import Field, Session, SQLModel, UniqueConstraint, select
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
-)
-
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+from db import engine
 
 
 class TickerProfile(SQLModel, table=True):

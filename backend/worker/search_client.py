@@ -13,11 +13,25 @@ def _server_params() -> StdioServerParameters:
     # of the caller's -- only what's explicitly passed here reaches
     # search_server.py. Built fresh per call so a changed/unset key is
     # always honored, not captured once at import time.
+    #
+    # IDENTITY_ENDPOINT/IDENTITY_HEADER are Container Apps' managed-identity
+    # token endpoint credentials, not secrets themselves -- forwarding them
+    # is what lets the subprocess's own DefaultAzureCredential reach Key
+    # Vault at all. Without them ManagedIdentityCredential has no IMDS-
+    # equivalent endpoint to call and fails closed.
+    env = {
+        "TAVILY_API_KEY": os.environ.get("TAVILY_API_KEY", ""),
+        "KEY_VAULT_URI": os.environ.get("KEY_VAULT_URI", ""),
+    }
+    for name in ("IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT"):
+        if name in os.environ:
+            env[name] = os.environ[name]
+
     return StdioServerParameters(
         command=sys.executable,
         args=["search_server.py"],
         cwd=SERVER_DIR,
-        env={"TAVILY_API_KEY": os.environ.get("TAVILY_API_KEY", "")},
+        env=env,
     )
 
 

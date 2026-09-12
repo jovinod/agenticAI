@@ -2,22 +2,18 @@ import asyncio
 import json
 import os
 
-from azure.servicebus.aio import ServiceBusClient
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, select
 
 from checkpointing import get_checkpointer
 from containment import run_ticker_safely
+from db import engine
 from graph import build_graph
 from models import Job
+from servicebus_client import build_servicebus_client
 from thread import build_thread_id, resolve_resume_input
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
-)
-SERVICEBUS_CONNECTION_STRING = os.environ.get("SERVICEBUS_CONNECTION_STRING")
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
 
-engine = create_engine(DATABASE_URL)
 SQLModel.metadata.create_all(engine)
 
 # Gives the frontend's "running" state something to observe before real
@@ -96,7 +92,7 @@ async def _mark_job_failed(job_id: str, exc: Exception) -> None:
 
 
 async def main() -> None:
-    client = ServiceBusClient.from_connection_string(SERVICEBUS_CONNECTION_STRING)
+    client = build_servicebus_client()
     async with client:
         async with client.get_queue_receiver(
             queue_name=SERVICEBUS_QUEUE_NAME
