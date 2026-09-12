@@ -81,6 +81,15 @@ param workerImage string = ''
 @description('Value of the API\'s ALLOWED_ORIGIN setting. Required when deployContainerApps is true.')
 param allowedOrigin string = 'http://localhost:5173'
 
+@description('Chapter 13: Microsoft Entra ID app registration (client) ID used for token validation.')
+param entraClientId string = ''
+
+@description('Chapter 13: Microsoft Entra ID tenant ID used for token validation.')
+param entraTenantId string = ''
+
+@description('Chapter 13: comma-separated allow-listed user emails permitted to use the application.')
+param allowedUsers string = ''
+
 @description('Chapter 5: real web-search tool credential, passed to the worker for its MCP search subprocess.')
 @secure()
 param tavilyApiKey string = ''
@@ -227,6 +236,9 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerAp
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'SERVICEBUS_CONNECTION_STRING', secretRef: 'servicebus-connection-string' }
             { name: 'ALLOWED_ORIGIN', value: allowedOrigin }
+            { name: 'ENTRA_CLIENT_ID', value: entraClientId }
+            { name: 'ENTRA_TENANT_ID', value: entraTenantId }
+            { name: 'ALLOWED_USERS', value: allowedUsers }
           ]
         }
       ]

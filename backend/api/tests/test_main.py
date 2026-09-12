@@ -1,17 +1,26 @@
 import os
 import unittest
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault(
     "SERVICEBUS_CONNECTION_STRING",
     "Endpoint=sb://fake.servicebus.windows.net/;"
     "SharedAccessKeyName=fake;SharedAccessKey=ZmFrZQ==",
 )
+os.environ.setdefault("ENTRA_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+os.environ.setdefault("ENTRA_TENANT_ID", "00000000-0000-0000-0000-000000000000")
 
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
 import main
+
+# This module tests the HTTP contract (validation, status codes,
+# 404s), not token validation -- that is auth.py's job and it is
+# tested on its own in test_auth.py. Overriding require_user here
+# keeps these tests fast and independent of a real Entra tenant.
+main.app.dependency_overrides[main.require_user] = lambda: object()
 
 
 class FakeSender:
@@ -48,6 +57,11 @@ class TestResearchContract(unittest.TestCase):
         )
         SQLModel.metadata.create_all(main.engine)
 
+        self.openid_config_patcher = patch.object(
+            main.azure_scheme.openid_config, "load_config", AsyncMock()
+        )
+        self.openid_config_patcher.start()
+
         self.client = TestClient(main.app)
         self.client.__enter__()
         self.fake_servicebus = FakeServiceBusClient()
@@ -55,6 +69,7 @@ class TestResearchContract(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.__exit__(None, None, None)
+        self.openid_config_patcher.stop()
 
     def test_create_and_read_research_job(self) -> None:
         response = self.client.post(

@@ -1,5 +1,8 @@
 import { useState } from 'react'
+import { useMsal } from '@azure/msal-react'
+import { InteractionRequiredAuthError } from '@azure/msal-browser'
 import './App.css'
+import { loginRequest } from './authConfig.js'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -10,11 +13,38 @@ const MAX_POLL_ATTEMPTS = 20
 const POLL_INTERVAL_MS = 500
 
 function App() {
+  const { instance, accounts } = useMsal()
   const [tickerInput, setTickerInput] = useState('')
   const [tickers, setTickers] = useState([])
   const [error, setError] = useState('')
   const [status, setStatus] = useState('idle') // 'idle' | 'loading' | 'done'
   const [report, setReport] = useState(null)
+
+  // Authenticated UI state is useful feedback, not security -- a
+  // caller can bypass this entirely and invoke the API directly. The
+  // browser's real responsibility is acquiring a token for the API
+  // scope and attaching it to every protected request.
+  async function getAccessToken() {
+    const account = accounts[0]
+    try {
+      const result = await instance.acquireTokenSilent({ ...loginRequest, account })
+      return result.accessToken
+    } catch (err) {
+      if (err instanceof InteractionRequiredAuthError) {
+        const result = await instance.acquireTokenPopup(loginRequest)
+        return result.accessToken
+      }
+      throw err
+    }
+  }
+
+  async function authedFetch(url, options = {}) {
+    const token = await getAccessToken()
+    return fetch(url, {
+      ...options,
+      headers: { ...options.headers, Authorization: `Bearer ${token}` },
+    })
+  }
 
   async function pollJob(jobId) {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt += 1) {
@@ -22,13 +52,23 @@ function App() {
 
       let response
       try {
-        response = await fetch(`${API_URL}/research/${jobId}`)
+        response = await authedFetch(`${API_URL}/research/${jobId}`)
       } catch (err) {
         setError('Lost connection to the server while waiting for results.')
         setStatus('idle')
         return
       }
 
+      if (response.status === 401) {
+        setError('Your session expired. Please sign in again.')
+        setStatus('idle')
+        return
+      }
+      if (response.status === 403) {
+        setError('You are not authorized to use this application.')
+        setStatus('idle')
+        return
+      }
       if (!response.ok) {
         setError(`The API returned ${response.status}.`)
         setStatus('idle')
@@ -76,7 +116,7 @@ function App() {
 
     let response
     try {
-      response = await fetch(`${API_URL}/research`, {
+      response = await authedFetch(`${API_URL}/research`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tickers: parsed }),
@@ -87,6 +127,16 @@ function App() {
       return
     }
 
+    if (response.status === 401) {
+      setError('Your session expired. Please sign in again.')
+      setStatus('idle')
+      return
+    }
+    if (response.status === 403) {
+      setError('You are not authorized to use this application.')
+      setStatus('idle')
+      return
+    }
     if (!response.ok) {
       setError(`The API returned ${response.status}.`)
       setStatus('idle')
@@ -102,6 +152,15 @@ function App() {
     setTickerInput('')
     setTickers([])
     setReport(null)
+  }
+
+  if (accounts.length === 0) {
+    return (
+      <div id="center">
+        <h1>Stock Research Assistant</h1>
+        <button onClick={() => instance.loginPopup(loginRequest)}>Sign in</button>
+      </div>
+    )
   }
 
   return (

@@ -6,11 +6,12 @@ from typing import Any
 
 from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from auth import azure_scheme, require_user
 from models import Job
 
 DATABASE_URL = os.environ.get(
@@ -26,6 +27,7 @@ SQLModel.metadata.create_all(engine)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await azure_scheme.openid_config.load_config()
     app.state.servicebus_client = ServiceBusClient.from_connection_string(
         SERVICEBUS_CONNECTION_STRING
     )
@@ -61,7 +63,9 @@ class ResearchRequest(BaseModel):
 
 
 @app.post("/research", status_code=202)
-async def create_research(request: ResearchRequest) -> dict[str, str]:
+async def create_research(
+    request: ResearchRequest, user=Depends(require_user)
+) -> dict[str, str]:
     job_id = str(uuid.uuid4())
 
     with Session(engine) as session:
@@ -80,7 +84,7 @@ async def create_research(request: ResearchRequest) -> dict[str, str]:
 
 
 @app.get("/research/{job_id}")
-async def get_research(job_id: str) -> dict[str, Any]:
+async def get_research(job_id: str, user=Depends(require_user)) -> dict[str, Any]:
     with Session(engine) as session:
         job = session.exec(select(Job).where(Job.job_id == job_id)).first()
 
