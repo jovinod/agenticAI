@@ -27,7 +27,7 @@ research_graph = build_graph()
 
 async def summarize_ticker(ticker: str, job_id: str) -> str:
     state = await research_graph.ainvoke({"ticker": ticker, "job_id": job_id})
-    return f"{ticker}: {state['final_report']}"
+    return f"{ticker} [{state.get('recommendation', 'N/A')}]: {state['final_report']}"
 
 
 async def process_message(

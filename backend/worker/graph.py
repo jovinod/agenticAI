@@ -4,7 +4,12 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from typing import Any
+
 import model_client
+from decision import make_decision
+from devil_advocate import run_devil_advocate
+from extended_data import fetch_extended_data
 from market_data import fetch_stock_data
 from profile_store import record_research
 from progress import write_progress
@@ -25,7 +30,12 @@ class ResearchState(TypedDict, total=False):
     technical_summary: str
     news_summary: str
     risk_summary: str
+    dissent: str
     final_report: str
+    recommendation: str
+    overall_score: float | None
+    hard_stops_triggered: list[str]
+    intrinsic_value: dict[str, Any]
     # Additive reducer: three parallel specialists each contribute one
     # independent usage record. Concatenation is correct because the
     # records are independent -- a shared running total would race.
@@ -161,51 +171,87 @@ async def risk_node(state: ResearchState) -> dict:
     }
 
 
-async def synthesizer_node(state: ResearchState) -> dict:
+async def _search_web(query: str) -> list[str]:
+    return await search(query, max_results=3)
+
+
+async def devil_advocate_node(state: ResearchState) -> dict:
+    start = time.monotonic()
+    summaries = {
+        "fundamentals": state.get("fundamentals_summary", ""),
+        "technical": state.get("technical_summary", ""),
+        "news": state.get("news_summary", ""),
+        "risk": state.get("risk_summary", ""),
+    }
+    result = await run_devil_advocate(model_client.chat, summaries, _search_web)
+    end = time.monotonic()
+    return {
+        "dissent": result["dissent"],
+        "node_intervals": [_interval("devil_advocate", start, end)],
+    }
+
+
+async def decision_node(state: ResearchState) -> dict:
+    """Terminal node: the model proposes a recommendation, then Python
+    overwrites the deterministic fields (hard stops, intrinsic value)
+    from real fetched data -- the model never controls those numbers."""
+    start = time.monotonic()
+    ticker = state["ticker"]
+    extended_data = fetch_extended_data(ticker)
+
     prior_context = state.get("prior_context", "")
     user_message = (
-        f"Fundamentals: {state.get('fundamentals_summary', '')}\n"
-        f"Technical: {state.get('technical_summary', '')}\n"
-        f"News: {state.get('news_summary', '')}\n"
-        f"Risk: {state.get('risk_summary', '')}"
+        f"Risk assessment: {state.get('risk_summary', '')}\n"
+        f"Dissent: {state.get('dissent', '')}"
     )
     if prior_context:
         user_message += f"\nPrior research on this ticker: {prior_context}"
 
-    result = await run_synthesis(
-        model_client.chat,
-        "You are a research synthesizer. Write one paragraph combining the "
-        "fundamentals, technical, news, and risk assessments given into a "
-        "single investment research summary, noting continuity with prior "
-        "research if any is given.",
-        user_message,
-    )
-    final_report = result["answer"]
+    messages = [
+        {
+            "role": "system",
+            "content": "You are the decision agent. Respond with JSON: "
+            '{"recommendation": "BUY|WAIT|HOLD|OVERPRICED", '
+            '"overall_score": number, "summary": string}',
+        },
+        {"role": "user", "content": user_message},
+    ]
+    result = await model_client.chat(messages, [])
+    decision = make_decision(result["message"]["content"], extended_data)
+    end = time.monotonic()
 
+    final_report = decision["summary"]
+    await _write_progress(state.get("job_id", ""), ticker, "decision", final_report)
     try:
-        await publish_embedding_job(
-            state.get("job_id", ""), state["ticker"], MARKET, final_report
-        )
+        await publish_embedding_job(state.get("job_id", ""), ticker, MARKET, final_report)
     except Exception:
         pass  # embedding is out of the research critical path
 
     return {
+        "recommendation": decision["recommendation"],
+        "overall_score": decision["overall_score"],
+        "hard_stops_triggered": decision["hard_stops_triggered"],
+        "intrinsic_value": decision["intrinsic_value"],
         "final_report": final_report,
-        "usage_log": [{"node": "synthesizer", **result.get("usage", {})}],
+        "usage_log": [{"node": "decision", **result.get("usage", {})}],
+        "node_intervals": [_interval("decision", start, end)],
     }
 
 
 def build_graph():
     """The chapter-stage topology: a memory node records and recalls
     context, then three independent specialists fan out, converge on
-    Risk, and Risk feeds one Synthesizer."""
+    Risk, then Risk feeds Devil's Advocate, then Decision -- Synthesizer
+    is removed, not retained beside them, so only one component ever
+    owns the final report."""
     builder = StateGraph(ResearchState)
     builder.add_node("memory", memory_node)
     builder.add_node("fundamentals", fundamentals_node)
     builder.add_node("technical", technical_node)
     builder.add_node("news", news_node)
     builder.add_node("risk", risk_node)
-    builder.add_node("synthesizer", synthesizer_node)
+    builder.add_node("devil_advocate", devil_advocate_node)
+    builder.add_node("decision", decision_node)
 
     builder.add_edge(START, "memory")
     builder.add_edge("memory", "fundamentals")
@@ -216,7 +262,8 @@ def build_graph():
     builder.add_edge("technical", "risk")
     builder.add_edge("news", "risk")
 
-    builder.add_edge("risk", "synthesizer")
-    builder.add_edge("synthesizer", END)
+    builder.add_edge("risk", "devil_advocate")
+    builder.add_edge("devil_advocate", "decision")
+    builder.add_edge("decision", END)
 
     return builder.compile()

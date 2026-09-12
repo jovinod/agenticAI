@@ -35,6 +35,10 @@ class TestWorker(unittest.TestCase):
         self.addCleanup(market_patcher.stop)
         market_patcher.start()
 
+        extended_patcher = patch("graph.fetch_extended_data", return_value={})
+        self.addCleanup(extended_patcher.stop)
+        extended_patcher.start()
+
         async def fake_search(query: str, max_results: int = 5) -> list[str]:
             return ['[{"title": "Fake headline", "url": "https://example.com"}]']
 

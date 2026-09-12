@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": { "value": "stockresearch" },
+    "deployStaticWebApp": { "value": true },
+    "deployPostgres": { "value": true },
+    "deployServiceBus": { "value": true },
+    "deployContainerRegistry": { "value": true },
+    "deployContainerApps": { "value": true },
+    "apiImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/api:chapter-03" },
+    "workerImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/worker:chapter-10" },
+    "deployFoundryModel": { "value": true },
+    "deployApim": { "value": true },
+    "deployRedis": { "value": true },
+    "deployPgVector": { "value": true },
+    "deployEmbeddingQueue": { "value": true },
+    "deployFoundryEmbedding": { "value": true },
+    "deployEmbedWorker": { "value": true },
+    "embedWorkerImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/embed-worker:chapter-09" },
+    "apimPublisherEmail": { "value": "ivinodj@gmail.com" }
+  }
+}
