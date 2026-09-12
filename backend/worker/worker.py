@@ -5,7 +5,9 @@ import os
 from azure.servicebus.aio import ServiceBusClient
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from market_data import fetch_stock_data
 from models import Job
+from risk_rules import flag_risk_factors, format_ticker_result
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://postgres:devpassword@localhost:5433/alpha"
@@ -16,9 +18,24 @@ SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
 engine = create_engine(DATABASE_URL)
 SQLModel.metadata.create_all(engine)
 
-# Intentionally temporary: stands in for real research work. Chapter 4
-# replaces this with an actual market-data call.
+# Gives the frontend's "running" state something to observe before real
+# per-ticker work starts, independent of how long that work takes.
 JOB_DELAY_SECONDS = 2.0
+
+
+def summarize_ticker(ticker: str) -> str:
+    data = fetch_stock_data(ticker)
+    if "error" in data:
+        return f"{ticker}: data unavailable ({data['error']})"
+
+    flags = flag_risk_factors(data)
+    result = format_ticker_result(data, flags)
+    flag_text = ", ".join(flags) if flags else "none"
+    currency = result.get("currency") or ""
+    return (
+        f"{ticker}: price {result['price']} {currency}, "
+        f"P/E {result.get('pe_ratio')}, risk flags: {flag_text}"
+    )
 
 
 async def process_message(
@@ -36,9 +53,7 @@ async def process_message(
 
     result = {
         "jobId": job_id,
-        "summary": [
-            f"{ticker}: sample result from the Chapter 3 worker." for ticker in tickers
-        ],
+        "summary": [summarize_ticker(ticker) for ticker in tickers],
     }
 
     with Session(engine) as session:

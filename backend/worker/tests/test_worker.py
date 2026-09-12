@@ -1,11 +1,21 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import worker
 from models import Job
+
+FAKE_STOCK_DATA = {
+    "ticker": "AAPL",
+    "price": 150.0,
+    "currency": "USD",
+    "pe_ratio": 25.0,
+    "fifty_two_week_high": 200.0,
+    "fifty_two_week_low": 100.0,
+}
 
 
 class TestWorker(unittest.TestCase):
@@ -20,6 +30,10 @@ class TestWorker(unittest.TestCase):
         with Session(worker.engine) as session:
             session.add(Job(job_id="job-1", tickers='["AAPL"]'))
             session.commit()
+
+        patcher = patch("worker.fetch_stock_data", return_value=FAKE_STOCK_DATA)
+        self.addCleanup(patcher.stop)
+        patcher.start()
 
     def test_process_message_completes_the_job(self) -> None:
         asyncio.run(worker.process_message("job-1", ["AAPL"], delay_seconds=0))
