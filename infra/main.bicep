@@ -316,7 +316,8 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
                 ]
               : [],
             deployRedis ? [{ name: 'REDIS_URL', secretRef: 'redis-url' }] : [],
-            deployKeyVault ? [{ name: 'KEY_VAULT_URI', value: keyVault!.properties.vaultUri }] : []
+            deployKeyVault ? [{ name: 'KEY_VAULT_URI', value: keyVault!.properties.vaultUri }] : [],
+            deployContentSafety ? [{ name: 'CONTENT_SAFETY_ENDPOINT', value: contentSafety!.properties.endpoint }] : []
           )
         }
       ]
@@ -672,3 +673,32 @@ resource tavilySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (deplo
 
 output keyVaultUri string = deployKeyVault ? keyVault!.properties.vaultUri : ''
 output keyVaultName string = deployKeyVault ? keyVault!.name : ''
+
+// ---------------------------------------------------------------------
+// Chapter 16: guardrails at the content boundary. Prompt Shields for
+// Documents classifies open-web text before it reaches model context.
+// ---------------------------------------------------------------------
+
+@description('Chapter 16: classify retrieved documents for indirect prompt injection.')
+param deployContentSafety bool = false
+
+@description('Azure region for Content Safety -- not available in every region (rejected in centralindia).')
+param contentSafetyLocation string = 'southindia'
+
+resource contentSafety 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (deployContentSafety) {
+  name: '${namePrefix}-contentsafety-${uniqueSuffix}'
+  location: contentSafetyLocation
+  kind: 'ContentSafety'
+  sku: {
+    name: 'S0'
+  }
+  properties: {
+    // Bearer-token authentication requires a custom subdomain --
+    // without one, role assignments alone still fail with a generic
+    // permission error that looks identical to a propagation delay.
+    customSubDomainName: '${namePrefix}-contentsafety-${uniqueSuffix}'
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+output contentSafetyEndpoint string = deployContentSafety ? contentSafety!.properties.endpoint : ''
