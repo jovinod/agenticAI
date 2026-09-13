@@ -107,3 +107,37 @@ async def get_research(job_id: str, user=Depends(require_user)) -> dict[str, Any
         "status": job.status,
         "result": json.loads(job.result) if job.result else None,
     }
+
+
+DEFAULT_HISTORY_LIMIT = 50
+
+
+@app.get("/reports")
+async def list_reports(
+    ticker: str | None = None,
+    limit: int = DEFAULT_HISTORY_LIMIT,
+    user=Depends(require_user),
+) -> list[dict[str, Any]]:
+    """History without new storage: Job already persists everything
+    this needs. A lowercase filter still matches, since tickers are
+    normalized to uppercase at submission time, not at query time."""
+    with Session(engine) as session:
+        query = (
+            select(Job)
+            .where(Job.status == "done")
+            .order_by(Job.created_at.desc())
+            .limit(limit)
+        )
+        if ticker:
+            query = query.where(Job.tickers.contains(f'"{ticker.strip().upper()}"'))
+        jobs = session.exec(query).all()
+
+    return [
+        {
+            "job_id": job.job_id,
+            "tickers": json.loads(job.tickers),
+            "status": job.status,
+            "created_at": job.created_at.isoformat(),
+        }
+        for job in jobs
+    ]
