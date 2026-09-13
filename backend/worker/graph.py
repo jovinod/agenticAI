@@ -14,7 +14,6 @@ from extended_data import fetch_extended_data
 from market_data import fetch_stock_data
 from profile_store import record_research
 from progress import write_progress
-from prompt_shields import MAX_TOTAL_CHARACTERS, scan_documents
 from publish_embedding_job import publish_embedding_job
 from risk_rules import flag_risk_factors
 from semantic_search import search_reports
@@ -129,38 +128,14 @@ async def technical_node(state: ResearchState) -> dict:
     }
 
 
-async def _safe_documents(documents: list[str]) -> list[str]:
-    """Scans retrieved web text for indirect prompt injection before it
-    reaches model context. Truncates to the real 10,000-character total
-    request limit first -- exceeding it is a 400, not a classifier
-    verdict, so length is handled as a request-shape concern, not folded
-    into "unsafe." A scan failure (fail-open, or a request error other
-    than the length limit) passes documents through unscanned rather
-    than losing the news specialist's only evidence."""
-    trimmed: list[str] = []
-    budget = MAX_TOTAL_CHARACTERS
-    for doc in documents:
-        if len(doc) > budget:
-            doc = doc[:budget]
-        trimmed.append(doc)
-        budget -= len(doc)
-        if budget <= 0:
-            break
-
-    try:
-        verdicts = await scan_documents(trimmed)
-    except Exception:
-        return trimmed
-
-    return [doc for doc, safe in zip(trimmed, verdicts) if safe]
-
-
 async def news_node(state: ResearchState) -> dict:
+    """Chapter 18 moved Prompt Shields scanning into search_client's own
+    search_via_mcp -- every caller of the search tool gets it for free,
+    not just this node."""
     start = time.monotonic()
     ticker = state["ticker"]
     try:
         headlines = await search(f"{ticker} stock news", max_results=3)
-        headlines = await _safe_documents(headlines)
     except Exception as exc:  # provider unavailable, no key, MCP transport error
         headlines = [f"search unavailable ({exc})"]
 

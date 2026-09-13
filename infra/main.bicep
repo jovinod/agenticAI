@@ -181,7 +181,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if
   }
 }
 
-resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = if (deployContainerApps) {
+resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = if (deployContainerApps) {
   name: '${namePrefix}-env'
   location: location
   properties: {
@@ -195,7 +195,7 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   }
 }
 
-resource apiApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApps) {
+resource apiApp 'Microsoft.App/containerApps@2025-01-01' = if (deployContainerApps) {
   name: '${namePrefix}-api'
   location: location
   properties: {
@@ -255,7 +255,26 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerAp
   }
 }
 
-resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApps) {
+// ---------------------------------------------------------------------
+// Chapter 18: scale the worker from Service Bus queue depth using its
+// own system-assigned identity to authenticate the scaler -- a
+// correctly authorized application does not imply a correctly
+// authorized scaling controller.
+// ---------------------------------------------------------------------
+
+@description('Chapter 18: enable queue-depth-based autoscaling on the research worker.')
+param deployWorkerQueueScaling bool = false
+
+@description('Minimum worker replicas.')
+param workerMinReplicas int = 1
+
+@description('Maximum worker replicas.')
+param workerMaxReplicas int = 1
+
+@description('Chapter 18: target queued messages per replica.')
+param workerQueueMessageCountTarget int = 1
+
+resource workerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployContainerApps) {
   name: '${namePrefix}-worker'
   location: location
   identity: {
@@ -327,13 +346,29 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
               : [],
             deployRedis ? [{ name: 'REDIS_URL', secretRef: 'redis-url' }] : [],
             deployKeyVault ? [{ name: 'KEY_VAULT_URI', value: keyVault!.properties.vaultUri }] : [],
-            deployContentSafety ? [{ name: 'CONTENT_SAFETY_ENDPOINT', value: contentSafety!.properties.endpoint }] : []
+            deployContentSafety ? [{ name: 'CONTENT_SAFETY_ENDPOINT', value: contentSafety!.properties.endpoint }] : [],
+            deployMcpSearch ? [{ name: 'MCP_SEARCH_URL', value: 'https://${mcpSearchApp!.properties.configuration.ingress.fqdn}/mcp' }] : []
           )
         }
       ]
       scale: {
-        minReplicas: 1
-        maxReplicas: 1
+        minReplicas: workerMinReplicas
+        maxReplicas: workerMaxReplicas
+        cooldownPeriod: 300
+        rules: deployWorkerQueueScaling ? [
+          {
+            name: 'servicebus-queue-scale-rule'
+            custom: {
+              type: 'azure-servicebus'
+              identity: 'system'
+              metadata: {
+                queueName: 'research-jobs'
+                namespace: deployServiceBus ? serviceBusNamespace!.name : ''
+                messageCount: string(workerQueueMessageCountTarget)
+              }
+            }
+          }
+        ] : []
       }
     }
   }
@@ -590,7 +625,7 @@ resource embeddingQueue 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' = if
   name: 'embedding-jobs'
 }
 
-resource embedWorkerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployEmbedWorker) {
+resource embedWorkerApp 'Microsoft.App/containerApps@2025-01-01' = if (deployEmbedWorker) {
   name: '${namePrefix}-embed-worker'
   location: location
   properties: {
@@ -751,3 +786,66 @@ resource openAiDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-pre
 
 output appInsightsConnectionString string = deployAppInsights ? appInsights!.properties.ConnectionString : ''
 output logAnalyticsWorkspaceId string = deployContainerApps ? logAnalytics!.properties.customerId : ''
+
+// ---------------------------------------------------------------------
+// Chapter 18: MCP search as a standalone internal service -- its own
+// process lifecycle, identity, and HTTP scaling boundary, instead of a
+// subprocess spawned inside every worker. Internal-only ingress: the
+// research worker is the only intended caller, reached over HTTPS
+// directly (internal ingress redirects HTTP to HTTPS, and following
+// that redirect turns a POST into a GET).
+// ---------------------------------------------------------------------
+
+@description('Chapter 18: run MCP search as its own Container App instead of a worker subprocess.')
+param deployMcpSearch bool = false
+
+@description('MCP search container image. Required when deployMcpSearch is true.')
+param mcpSearchImage string = ''
+
+resource mcpSearchApp 'Microsoft.App/containerApps@2025-01-01' = if (deployMcpSearch) {
+  name: '${namePrefix}-mcp-search'
+  location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    managedEnvironmentId: containerAppsEnvironment.id
+    configuration: {
+      ingress: {
+        external: false
+        targetPort: 8811
+        transport: 'http'
+      }
+      registries: [
+        {
+          server: '${containerRegistry!.name}.azurecr.io'
+          username: containerRegistry!.listCredentials().username
+          passwordSecretRef: 'acr-password'
+        }
+      ]
+      secrets: [
+        {
+          name: 'acr-password'
+          value: containerRegistry!.listCredentials().passwords[0].value
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'mcp-search'
+          image: mcpSearchImage
+          env: [
+            { name: 'KEY_VAULT_URI', value: deployKeyVault ? keyVault!.properties.vaultUri : '' }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 5
+      }
+    }
+  }
+}
+
+output mcpSearchFqdn string = deployMcpSearch ? mcpSearchApp!.properties.configuration.ingress.fqdn : ''
