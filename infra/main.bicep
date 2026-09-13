@@ -225,6 +225,10 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerAp
           name: 'servicebus-connection-string'
           value: serviceBusSendListenRule!.listKeys().primaryConnectionString
         }
+        {
+          name: 'appinsights-connection-string'
+          value: deployAppInsights ? appInsights!.properties.ConnectionString : ''
+        }
       ]
     }
     template: {
@@ -239,6 +243,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerAp
             { name: 'ENTRA_CLIENT_ID', value: entraClientId }
             { name: 'ENTRA_TENANT_ID', value: entraTenantId }
             { name: 'ALLOWED_USERS', value: allowedUsers }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
           ]
         }
       ]
@@ -291,6 +296,10 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
           name: 'redis-url'
           value: deployRedis ? 'rediss://:${redisDatabase!.listKeys().primaryKey}@${redisEnterprise!.properties.hostName}:10000' : ''
         }
+        {
+          name: 'appinsights-connection-string'
+          value: deployAppInsights ? appInsights!.properties.ConnectionString : ''
+        }
       ]
     }
     template: {
@@ -308,6 +317,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
               { name: 'SERVICEBUS_FQDN', value: deployServiceBus ? '${serviceBusNamespace!.name}.servicebus.windows.net' : '' }
               { name: 'TAVILY_API_KEY', secretRef: 'tavily-api-key' }
               { name: 'SERVICEBUS_EMBEDDING_QUEUE_NAME', value: 'embedding-jobs' }
+              { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'appinsights-connection-string' }
             ],
             deployApim
               ? [
@@ -702,3 +712,42 @@ resource contentSafety 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (d
 }
 
 output contentSafetyEndpoint string = deployContentSafety ? contentSafety!.properties.endpoint : ''
+
+// ---------------------------------------------------------------------
+// Chapter 17: observability. Application Insights (workspace-backed,
+// using the Log Analytics workspace already created for Container
+// Apps logging) plus diagnostic settings exporting Azure OpenAI
+// request metadata -- no prompt or completion text -- to the same
+// workspace.
+// ---------------------------------------------------------------------
+
+@description('Chapter 17: receive API, worker, and agent OpenTelemetry spans.')
+param deployAppInsights bool = false
+
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (deployAppInsights) {
+  name: '${namePrefix}-appinsights'
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalytics!.id
+    IngestionMode: 'LogAnalytics'
+  }
+}
+
+resource openAiDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (deployAppInsights && deployFoundryModel) {
+  name: 'openai-to-log-analytics'
+  scope: openAiAccount
+  properties: {
+    workspaceId: logAnalytics!.id
+    logs: [
+      {
+        category: 'RequestResponse'
+        enabled: true
+      }
+    ]
+  }
+}
+
+output appInsightsConnectionString string = deployAppInsights ? appInsights!.properties.ConnectionString : ''
+output logAnalyticsWorkspaceId string = deployContainerApps ? logAnalytics!.properties.customerId : ''

@@ -1,7 +1,9 @@
 import asyncio
+import datetime
 import json
 import os
 
+from opentelemetry import trace
 from sqlmodel import Session, SQLModel, select
 
 from checkpointing import get_checkpointer
@@ -15,6 +17,14 @@ from thread import build_thread_id, resolve_resume_input
 SERVICEBUS_QUEUE_NAME = os.environ.get("SERVICEBUS_QUEUE_NAME", "research-jobs")
 
 SQLModel.metadata.create_all(engine)
+
+# Local execution is intentionally quiet when this is absent.
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor
+
+    configure_azure_monitor()
+
+tracer = trace.get_tracer(__name__)
 
 # Gives the frontend's "running" state something to observe before real
 # per-ticker work starts, independent of how long that work takes.
@@ -100,15 +110,28 @@ async def main() -> None:
             print("Worker started, waiting for messages...")
             async for message in receiver:
                 data = json.loads(str(message))
+                queue_wait_seconds = None
+                if message.enqueued_time_utc is not None:
+                    queue_wait_seconds = (
+                        datetime.datetime.now(datetime.timezone.utc)
+                        - message.enqueued_time_utc
+                    ).total_seconds()
+
                 # A per-ticker failure is already contained inside
                 # process_message; this catches something unexpected
                 # enough to reach here (e.g. a DB write failure) so one
                 # bad job marks itself failed instead of killing the
                 # receive loop for every job after it.
-                try:
-                    await process_message(data["job_id"], data["tickers"])
-                except Exception as exc:
-                    await _mark_job_failed(data["job_id"], exc)
+                with tracer.start_as_current_span("process_job") as span:
+                    span.set_attribute("job_id", data["job_id"])
+                    span.set_attribute("tickers", data["tickers"])
+                    if queue_wait_seconds is not None:
+                        span.set_attribute("queue_wait_seconds", queue_wait_seconds)
+                    try:
+                        await process_message(data["job_id"], data["tickers"])
+                    except Exception as exc:
+                        await _mark_job_failed(data["job_id"], exc)
+
                 await receiver.complete_message(message)
 
 

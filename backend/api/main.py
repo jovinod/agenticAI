@@ -8,6 +8,8 @@ from azure.servicebus import ServiceBusMessage
 from azure.servicebus.aio import ServiceBusClient
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -24,6 +26,14 @@ ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost:5173")
 engine = create_engine(DATABASE_URL)
 SQLModel.metadata.create_all(engine)
 
+# Local execution is intentionally quiet when this is absent -- no
+# secrets, tokens, or user content go anywhere without an explicit
+# destination configured.
+if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor
+
+    configure_azure_monitor()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -36,6 +46,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Stock Research API", lifespan=lifespan)
+FastAPIInstrumentor.instrument_app(app)
 
 # CORS is a browser-facing access rule, not authentication -- it only
 # controls which origins a browser will let JavaScript read a response
@@ -67,6 +78,7 @@ async def create_research(
     request: ResearchRequest, user=Depends(require_user)
 ) -> dict[str, str]:
     job_id = str(uuid.uuid4())
+    trace.get_current_span().set_attribute("job_id", job_id)
 
     with Session(engine) as session:
         session.add(Job(job_id=job_id, tickers=json.dumps(request.tickers)))
