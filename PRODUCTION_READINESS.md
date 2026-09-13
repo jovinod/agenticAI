@@ -18,7 +18,7 @@ real standalone MCP search service and a real Azure OpenAI deployment.
 This document is the honest accounting of what that rebuild actually
 proved, what's still a real limitation, and what would need attention
 before treating this as a genuine production system rather than a
-faithful, chapter-by-chapter validation of book_revised's claims.
+faithful, chapter-by-chapter validation of the book's claims.
 
 ## What's real and deployed
 
