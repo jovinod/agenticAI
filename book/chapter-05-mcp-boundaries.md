@@ -255,6 +255,22 @@ No model chooses tools at this stage. The compact stdio lifecycle pays process-s
 
 The current HTTP service solves process lifetime and secret ownership differently, but those improvements do not make web content trustworthy or eliminate provider cost.
 
+## Run This Stage
+
+- **Repository tag:** `chapter-05-complete`.
+- **Azure resources:** none new; the MCP server runs as a subprocess inside the existing Chapter 3 worker on Azure Container Apps.
+- **Run it:** provision or reuse the Chapter 3 resources with `./infra/deploy.sh infra/params/chapter-05.json` (see the Chapter 5 row in [Azure Setup and Deployment](azure-setup.md)), and get a Tavily API key — this stage's search tool calls the paid Tavily search provider, so `TAVILY_API_KEY` must be set (put it in `infra/.tavily-api-key` if deploying, so `deploy.sh` picks it up).
+
+  ```bash
+  git switch --detach chapter-05-complete
+
+  cd backend/worker
+  uv sync
+  DATABASE_URL=... SERVICEBUS_CONNECTION_STRING=... TAVILY_API_KEY=... uv run python worker.py
+  ```
+
+  The API and frontend run the same way as Chapter 4. Submitting a ticker now spawns the MCP search subprocess and returns real search results alongside the fabricated report content.
+
 ## Next
 
 The capability is discoverable and callable, but nothing can decide when it is useful. Chapter 6 builds the first model/tool conversation loop: it translates tool descriptions, accepts structured requests, executes only allowlisted functions, returns correlated results, and stops within explicit limits.

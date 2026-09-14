@@ -174,6 +174,20 @@ No curated Chapter 15 tag exists. These current workspace paths expose the imple
 | `backend/worker/tools/web_search.py` | The HTTP MCP client boundary |
 | `backend/worker/mcp_server/search_server.py` | The separate search service and Tavily ownership |
 
+## Run This Stage
+
+The repository has since gained a `chapter-15-complete` tag, which matches this chapter's boundary review even though the "no curated tag" line above predates it. This chapter adds no new resource or code path to run — it is a review of trust boundaries in the system as already deployed through Chapter 14.
+
+- **Repository tag:** `chapter-15-complete`.
+- **Azure resources:** none new; see the Chapter 14 stack. Redeploy with `./infra/deploy.sh infra/params/chapter-15.json` to update the worker image (see [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-15-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
 ## Next
 
 The registry prevents an injected instruction from inventing a new tool, but allowed search results still become model context. Chapter 16 scans that untrusted boundary with Prompt Shields and separately scrubs accidental personal data from the API's free-text search input.

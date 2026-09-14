@@ -1,2 +1,3 @@
 .postgres-admin-password
 .tavily-api-key
+.local-config

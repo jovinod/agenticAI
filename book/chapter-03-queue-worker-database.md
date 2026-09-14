@@ -306,6 +306,31 @@ The companion repository marks the code before and after this chapter with Git t
 
 After inspecting a snapshot, run `git switch -` to return to your previous branch.
 
+## Run This Stage
+
+- **Repository tag:** `chapter-03-complete` (deployed to Azure), or `chapter-03-local-complete` for a SQLite-backed version that needs no Azure resources.
+- **Azure resources:** Azure Container Registry, Azure Container Apps (API and worker), Azure Database for PostgreSQL Flexible Server, and an Azure Service Bus queue, as listed above.
+
+**Option A — fully local, no Azure**, using the SQLite variant, in two terminals:
+
+```bash
+git switch --detach chapter-03-local-complete
+
+# terminal 1
+cd backend/api
+uv sync
+uv run uvicorn main:app --reload
+
+# terminal 2
+cd backend/worker
+uv sync
+uv run python worker.py
+```
+
+Run both from the same `backend/` checkout so they share the default `jobs.db` path (or set `DATABASE_PATH` to the same file for each). Then start the frontend as in Chapter 2 and submit a ticker.
+
+**Option B — the deployed Azure path**, using `chapter-03-complete`: follow the Chapter 3 walkthrough in [Azure Setup and Deployment](azure-setup.md) to provision the resource group, registry, Container Apps environment, Service Bus queue, and PostgreSQL server, build and push the images, and deploy the API and worker. That guide includes the exact `az` commands and a live-job verification step. `SERVICEBUS_CONNECTION_STRING` has no local default in this code path — a real Service Bus namespace is required unless you use the Option A tag instead.
+
 ## Next
 
 The API and worker now have separate responsibilities, and job state survives process restarts. The worker still treats `AAPL, MSFT` as one indivisible job and returns fabricated text.

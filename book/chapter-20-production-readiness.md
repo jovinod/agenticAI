@@ -326,6 +326,63 @@ The final system is larger than one chapter excerpt. These current workspace pat
 | `backend/worker/tools/web_search.py` | MCP search and the untrusted-document guardrail boundary |
 | `backend/embed-worker/embed_worker.py` | Asynchronous report embedding and semantic-memory persistence |
 
+## Run This Stage
+
+This is the finished system. Getting it running for real means provisioning every resource in the table above; `chapter-20-complete` is the tag that exercises all of them.
+
+- **Repository tag:** `chapter-20-complete`.
+- **Azure resources:** everything in the table above. `infra/params/chapter-20.json` turns on all of it in one deployment; see the stage-by-stage reference in [Azure Setup and Deployment](azure-setup.md) for what each part needs from you (your own registry images, Entra ID app, and Tavily key at minimum):
+
+  ```bash
+  git switch --detach chapter-20-complete
+  ./infra/deploy.sh infra/params/chapter-20.json
+  ```
+- **Check it offline first**, with no Azure resource provisioned, to confirm the code itself is sound before spending anything:
+
+  ```bash
+  git switch --detach chapter-20-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../embed-worker && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../mcp-search && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../../frontend && npm install
+  ```
+
+- **Run the actual site**, once the resources above exist, in five terminals from `chapter-20-complete`:
+
+  ```bash
+  # terminal 1 — search service
+  cd backend/mcp-search
+  TAVILY_API_KEY=... uv run python search_server.py
+
+  # terminal 2 — API
+  cd backend/api
+  DATABASE_URL=... SERVICEBUS_CONNECTION_STRING=... ALLOWED_ORIGIN=http://localhost:5173 \
+  ENTRA_CLIENT_ID=... ENTRA_TENANT_ID=... ALLOWED_USERS=... \
+  REDIS_URL=... APPLICATIONINSIGHTS_CONNECTION_STRING=... \
+  uv run uvicorn main:app --reload
+
+  # terminal 3 — research worker
+  cd backend/worker
+  DATABASE_URL=... SERVICEBUS_CONNECTION_STRING=... TAVILY_API_KEY=... \
+  APIM_BASE_URL=... APIM_SUBSCRIPTION_KEY=... APIM_API_VERSION=... \
+  REDIS_URL=... CONTENT_SAFETY_ENDPOINT=... APPLICATIONINSIGHTS_CONNECTION_STRING=... \
+  uv run python worker.py
+
+  # terminal 4 — embedding worker
+  cd backend/embed-worker
+  DATABASE_URL=... SERVICEBUS_CONNECTION_STRING=... uv run python embed_worker.py
+
+  # terminal 5 — frontend
+  cd frontend
+  VITE_API_URL=http://localhost:8000 VITE_ENTRA_CLIENT_ID=... VITE_ENTRA_TENANT_ID=... VITE_ENTRA_API_SCOPE=... \
+  npm run dev
+  ```
+
+  Sign in, submit a ticker, and watch the full path: the API queues the job, the worker runs the six-node graph and search guardrails, the embed-worker indexes the finished report, and the frontend polls through to a structured decision with history.
+
+  This is deliberately more assembly than any single chapter needed — it is the sum of every stage's resources and variables, which is also this chapter's point about what "production-ready" actually costs to stand up.
+
 ## Conclusion
 
 Stock Research Assistant begins with a text field and a fake delay. It ends with a distributed research application whose long work is durable, whose agents have explicit roles, whose failures can degrade rather than erase all value, whose identities are scoped, whose untrusted search content crosses a guardrail, whose latency can be explained, and whose reports can be traced back to a job.

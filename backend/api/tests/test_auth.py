@@ -14,15 +14,15 @@ class FakeUser:
 
 
 class TestRequireUser(unittest.TestCase):
-    @patch.object(auth, "ALLOWED_USERS", {"josh.vinod@hotmail.com"})
+    @patch.object(auth, "ALLOWED_USERS", {"allowed.user@example.com"})
     def test_a_valid_token_for_an_allowed_user_passes_through(self) -> None:
-        user = FakeUser(preferred_username="josh.vinod@hotmail.com")
+        user = FakeUser(preferred_username="allowed.user@example.com")
 
         result = asyncio.run(auth.require_user(user))
 
         self.assertIs(result, user)
 
-    @patch.object(auth, "ALLOWED_USERS", {"josh.vinod@hotmail.com"})
+    @patch.object(auth, "ALLOWED_USERS", {"allowed.user@example.com"})
     def test_a_valid_token_for_a_user_outside_the_allow_list_is_403(self) -> None:
         user = FakeUser(preferred_username="someone.else@example.com")
 
@@ -31,17 +31,17 @@ class TestRequireUser(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 403)
 
-    @patch.object(auth, "ALLOWED_USERS", {"josh.vinod@hotmail.com"})
+    @patch.object(auth, "ALLOWED_USERS", {"allowed.user@example.com"})
     def test_the_allow_list_check_is_case_insensitive(self) -> None:
-        user = FakeUser(preferred_username="Josh.Vinod@Hotmail.com")
+        user = FakeUser(preferred_username="Allowed.User@Example.com")
 
         result = asyncio.run(auth.require_user(user))
 
         self.assertIs(result, user)
 
-    @patch.object(auth, "ALLOWED_USERS", {"josh.vinod@hotmail.com"})
+    @patch.object(auth, "ALLOWED_USERS", {"allowed.user@example.com"})
     def test_falls_back_to_email_when_preferred_username_is_absent(self) -> None:
-        user = FakeUser(preferred_username=None, email="josh.vinod@hotmail.com")
+        user = FakeUser(preferred_username=None, email="allowed.user@example.com")
 
         result = asyncio.run(auth.require_user(user))
 

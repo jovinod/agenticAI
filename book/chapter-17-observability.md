@@ -278,6 +278,20 @@ These current workspace paths expose the instrumentation and the change it motiv
 | `backend/worker/agents/graph.py` | Per-agent spans, token attributes, and fan-out/fan-in execution |
 | `backend/worker/agents/fundamentals_agent.py` | The `asyncio.to_thread()` boundary for synchronous market-data I/O |
 
+## Run This Stage
+
+- **Repository tag:** `chapter-17-complete`.
+- **Azure resources:** Application Insights and its Log Analytics workspace, plus Azure OpenAI diagnostic settings, on top of the Chapter 16 stack. Provision with `./infra/deploy.sh infra/params/chapter-17.json` (see the Chapter 17 row in [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-17-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** set `APPLICATIONINSIGHTS_CONNECTION_STRING` for the API and worker in addition to the earlier variables — Azure Monitor setup is conditional on that variable being present, so the app still runs locally without it, just without exported spans.
+
 ## Next
 
 The traces reveal what one ticker costs in time. They do not prove that the system responds correctly when many tickers arrive together. Chapter 18 turns queue depth and replica count into measured scaling evidence and moves the MCP search process behind its own independently operated boundary.

@@ -210,6 +210,21 @@ No curated Chapter 11 tag exists, so this chapter points to current source and d
 | `backend/worker/pyproject.toml` | The PostgreSQL checkpoint package used by the worker |
 | `backend/worker/memory/short_term.py` | The separate Redis progress boundary that can be visible before a graph super-step commits |
 
+## Run This Stage
+
+- **Repository tag:** `chapter-11-complete`.
+- **Azure resources:** none new; checkpointing reuses the Chapter 9 PostgreSQL server rather than adding a service. Redeploy with `./infra/deploy.sh infra/params/chapter-11.json` to update the worker image (see [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-11-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../embed-worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** same variables and process layout as Chapter 10. To see resume behavior, kill the worker process mid-run on a submitted ticker and restart it — the graph should continue from its last completed super-step instead of repeating finished nodes.
+
 ## Next
 
 Checkpointing recovers workflow position after interruption, but many failures occur while the worker remains alive: a model call times out, a read fails, or one node exhausts retries. Chapter 12 adds bounded retry and honest degraded results for those smaller failure boundaries.

@@ -235,6 +235,20 @@ These current workspace paths contain the complete implementation:
 | `backend/api/pii_scrub.py` | The deliberately narrow email and phone transformations |
 | `backend/api/main.py` | The semantic-search path that scrubs before embedding |
 
+## Run This Stage
+
+- **Repository tag:** `chapter-16-complete`.
+- **Azure resources:** Azure AI Content Safety, called via Managed Identity from the worker, on top of the Chapter 14 stack. Provision with `./infra/deploy.sh infra/params/chapter-16.json` (see the Chapter 16 row in [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-16-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** in addition to the earlier variables, set `CONTENT_SAFETY_ENDPOINT` and deploy with Managed Identity so the worker can authenticate to it without a stored key. The PII scrubber in `backend/api/pii_scrub.py` needs no Azure resource and runs the same way locally or deployed.
+
 ## Next
 
 Guardrails now change what content reaches the model, but operators still need proof of when they ran, how long dependencies took, which agent consumed tokens, and where a failed request stopped. Chapter 17 adds correlated observability without logging the sensitive content these controls remove.

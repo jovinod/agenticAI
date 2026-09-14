@@ -237,6 +237,23 @@ The finished repository has moved beyond this exact five-node topology, and no c
 | `backend/worker/agents/risk_agent.py` | Deterministic risk flags combined with cross-signal synthesis |
 | `backend/worker/agent_harness.py` | The shared model/tool loop that graph nodes reuse rather than reimplement |
 
+## Run This Stage
+
+The repository has since gained a `chapter-08-complete` tag ("real five-node graph wired into the deployed worker's job path"), which matches the five-node milestone this chapter describes even though the prose above predates it.
+
+- **Repository tag:** `chapter-08-complete`.
+- **Azure resources:** none new; the same Chapter 3 stack plus the Chapter 7 APIM-fronted model deployment. Redeploy with `./infra/deploy.sh infra/params/chapter-08.json` to update the worker image (see [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:** the graph's own tests exercise fan-out, the Risk barrier, and state reduction without a live model or search call:
+
+  ```bash
+  git switch --detach chapter-08-complete
+  cd backend/worker
+  uv sync
+  uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** set `DATABASE_URL`, `SERVICEBUS_CONNECTION_STRING`, `TAVILY_API_KEY`, and the `APIM_*` variables from Chapter 7, then run the API and worker as before. Each submitted ticker now drives the fundamentals, technical, and news specialists in parallel before the Risk node combines them.
+
 ## Next
 
 The graph can move state during one run, but that does not answer what the system should remember while work is in flight or after a report is complete. Chapter 9 separates short-lived progress, exact ticker profiles, and semantic report search by lifetime and lookup behavior.

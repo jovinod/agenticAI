@@ -291,6 +291,20 @@ These current workspace paths show the product contract and its rendering:
 | `frontend/src/App.jsx` | Authentication states, polling, history navigation, errors, and copyable `job_id` |
 | `frontend/src/App.css` | The visual hierarchy for research, history, failure, and decision states |
 
+## Run This Stage
+
+- **Repository tag:** `chapter-19-complete`.
+- **Azure resources:** none new; this chapter refines behavior on the Chapter 18 stack. Redeploy with `./infra/deploy.sh infra/params/chapter-19.json` to update the API image (see [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-19-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** same variables and process layout as Chapter 18. This is the tag to use if you want to see the polished product surface — per-ticker terminal states, history, and the copyable `job_id` — rather than just the underlying job contract.
+
 ## Next
 
 Stock Research Assistant now has a coherent user journey and a supportable operational identity. The final chapter stops adding components. It walks the entire system, scores readiness with evidence, names residual risks and cost categories, and defines what production-ready requires beyond this learning deployment.

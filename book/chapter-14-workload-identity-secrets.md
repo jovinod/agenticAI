@@ -184,6 +184,22 @@ No curated Chapter 14 tag exists. These current workspace paths show the credent
 | `backend/worker/mcp_server/search_server.py` | Key Vault ownership of the Tavily secret |
 | `backend/api/Dockerfile`, `backend/worker/Dockerfile`, and `backend/embed-worker/Dockerfile` | Image build boundaries that depend on matching `.dockerignore` files |
 
+## Run This Stage
+
+The repository has since gained a `chapter-14-complete` tag, which matches this chapter's identity work even though the "no curated tag" line above predates it.
+
+- **Repository tag:** `chapter-14-complete`.
+- **Azure resources:** Managed Identity on each Container App, Azure Key Vault for the Tavily secret, and RBAC/database-grant changes on Service Bus, PostgreSQL, and Redis. Provision with `./infra/deploy.sh infra/params/chapter-14.json` (see the Chapter 14 row in [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-14-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** this stage is meant to run deployed, with each Container App using its own Managed Identity — the code paths that read `KEY_VAULT_URI`, token-backed `DATABASE_HOST`/`DATABASE_USER`, and `SERVICEBUS_FQDN` assume that identity context. Local development still works with connection-string variables from earlier chapters; the identity paths only activate when deployed to Azure with Managed Identity configured.
+
 ## Next
 
 The services now have identities, but the agents inside the worker do not. Chapter 15 distinguishes service identity from agent capability, maps the real process and tool boundaries, and states where isolation is absent.

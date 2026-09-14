@@ -289,6 +289,21 @@ Only one discoverable skill exists in the current repository. Discovery trusts c
 
 APIM narrows model-resource credential exposure, but the worker's subscription key still requires secret management. Transport normalization does not make model behavior deterministic across providers.
 
+## Run This Stage
+
+- **Repository tag:** `chapter-07-complete`.
+- **Azure resources:** Azure API Management in front of an Azure-hosted model deployment in Microsoft Foundry, alongside the Chapter 3 stack. Set `APIM_PUBLISHER_EMAIL` in `infra/.local-config` (see [Azure Setup and Deployment](azure-setup.md)) and provision with `./infra/deploy.sh infra/params/chapter-07.json`.
+- **Run it without an agent call:** the model client's own tests exercise transport and usage-normalization behavior with no live provider:
+
+  ```bash
+  git switch --detach chapter-07-complete
+  cd backend/worker
+  uv sync
+  uv run python -m unittest tests.test_model_client -v
+  ```
+
+- **Run it end to end:** once your own APIM instance fronts a deployed model, set `APIM_BASE_URL`, `APIM_SUBSCRIPTION_KEY`, and `APIM_API_VERSION` (plus `DATABASE_URL`, `SERVICEBUS_CONNECTION_STRING`, and `TAVILY_API_KEY` from earlier stages) and run the API and worker as in Chapter 5.
+
 ## Next
 
 The worker now has one harness, one normalized model boundary, and discoverable reviewed capabilities. Chapter 8 uses those shared pieces to schedule specialized agents without copying the message loop or provider client into every graph node.

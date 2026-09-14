@@ -365,6 +365,28 @@ The risk thresholds are intentionally simple. They identify visible conditions; 
 
 No new Azure resource becomes active in this chapter. The diagram describes the chapter's responsibility model, including its deliberately local SQLite store. The evolved cloud services change where those responsibilities run, not the per-ticker contract.
 
+## Run This Stage
+
+- **Repository tag:** `chapter-04-complete`.
+- **Azure resources:** none new. This stage runs on the same Chapter 3 stack: Container Apps for the API and worker, PostgreSQL for job state, and Service Bus to deliver work.
+- **Run it:** from this tag on, the code expects real PostgreSQL and Service Bus connections — there is no SQLite fallback like `chapter-03-local-complete`. Provision the Chapter 3 resources (if you have not already) with `./infra/deploy.sh infra/params/chapter-04.json` (see the Chapter 4 row in [Azure Setup and Deployment](azure-setup.md)), or run PostgreSQL as a local container and point `DATABASE_URL` at it (the code defaults to `postgresql+psycopg://postgres:devpassword@localhost:5433/alpha` when unset). `SERVICEBUS_CONNECTION_STRING` has no local default, so a real Azure Service Bus namespace is required. Then:
+
+  ```bash
+  git switch --detach chapter-04-complete
+
+  # terminal 1
+  cd backend/api
+  uv sync
+  DATABASE_URL=... SERVICEBUS_CONNECTION_STRING=... uv run uvicorn main:app --reload
+
+  # terminal 2
+  cd backend/worker
+  uv sync
+  DATABASE_URL=... SERVICEBUS_CONNECTION_STRING=... uv run python worker.py
+  ```
+
+  The worker now calls `yfinance` directly for real market data, so this stage needs outbound internet access; no API key is required for that call.
+
 ## Next
 
 Market data and risk rules are deterministic: every ticker needs them, and application code always calls them. Web search is different. It is remote, budgeted, and useful only for some research questions.

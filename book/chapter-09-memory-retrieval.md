@@ -213,6 +213,25 @@ No curated Chapter 9 tag exists, so this chapter does not present Git inspection
 | `backend/embed-worker/embed_worker.py` | Embedding consumption and durable report writes |
 | `backend/embed-worker/models.py` | The 1,536-dimension pgvector report schema |
 
+## Run This Stage
+
+- **Repository tag:** `chapter-09-complete`.
+- **Azure resources:** Azure Cache for Redis, pgvector enabled on the Chapter 3 PostgreSQL server, and a new `embedding-jobs` Service Bus queue with a separate Azure Container Apps worker to consume it. Set `REGISTRY_LOGIN_SERVER` in `infra/.local-config` (see [Azure Setup and Deployment](azure-setup.md)) and provision with `./infra/deploy.sh infra/params/chapter-09.json`.
+- **Run it offline:** the worker and the new embed-worker each have their own test suites that run without Redis, Postgres, or a live model:
+
+  ```bash
+  git switch --detach chapter-09-complete
+  cd backend/worker && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../embed-worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** in addition to the earlier variables, set `REDIS_URL` for the API and worker, and run the embed-worker as its own process against `DATABASE_URL` and a Service Bus connection string scoped to the `embedding-jobs` queue:
+
+  ```bash
+  cd backend/embed-worker
+  DATABASE_URL=... SERVICEBUS_CONNECTION_STRING=... uv run python embed_worker.py
+  ```
+
 ## Next
 
 Memory makes work visible and searchable, but a Synthesizer can still turn repeated agreement into a confident conclusion without testing the shared premise. Chapter 10 replaces that tail with explicit counter-evidence and a decision boundary that keeps deterministic calculations under application control.

@@ -8,8 +8,8 @@
     "deployServiceBus": { "value": true },
     "deployContainerRegistry": { "value": true },
     "deployContainerApps": { "value": true },
-    "apiImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/api:chapter-03" },
-    "workerImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/worker:chapter-12" },
+    "apiImage": { "value": "YOUR_REGISTRY.azurecr.io/api:chapter-03" },
+    "workerImage": { "value": "YOUR_REGISTRY.azurecr.io/worker:chapter-12" },
     "deployFoundryModel": { "value": true },
     "deployApim": { "value": true },
     "deployRedis": { "value": true },
@@ -17,7 +17,7 @@
     "deployEmbeddingQueue": { "value": true },
     "deployFoundryEmbedding": { "value": true },
     "deployEmbedWorker": { "value": true },
-    "embedWorkerImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/embed-worker:chapter-09" },
-    "apimPublisherEmail": { "value": "ivinodj@gmail.com" }
+    "embedWorkerImage": { "value": "YOUR_REGISTRY.azurecr.io/embed-worker:chapter-09" },
+    "apimPublisherEmail": { "value": "YOUR_EMAIL@example.com" }
   }
 }

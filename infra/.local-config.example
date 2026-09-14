@@ -1,0 +1,27 @@
+# Copy this file to infra/.local-config (gitignored, never committed) and
+# fill in only the values the chapter you're deploying needs. deploy.sh
+# substitutes these into the checked-in params file's placeholder tokens
+# before deploying, so your registry, email, and Entra ID never touch a
+# tracked file.
+#
+# See the "Stage-by-stage reference" table in book/azure-setup.md for
+# which chapter first needs each value.
+
+# Chapter 3 onward -- your own Azure Container Registry, e.g.
+# myregistry.azurecr.io (get it from `az acr show --name <registry> --query loginServer -o tsv`)
+REGISTRY_LOGIN_SERVER=
+
+# Chapter 7 onward -- the publisher email Azure API Management requires at creation
+APIM_PUBLISHER_EMAIL=
+
+# Chapter 13 onward -- your own Microsoft Entra ID app registration
+ENTRA_CLIENT_ID=
+ENTRA_TENANT_ID=
+
+# Chapter 13 onward -- comma-separated sign-in identities allowed to use the app
+ALLOWED_USERS=
+
+# Chapter 13 onward -- your deployed frontend's origin, e.g.
+# https://your-app-name.azurestaticapps.net
+# (the staticWebAppHostname output from the Chapter 1 deployment, with an https:// prefix)
+ALLOWED_ORIGIN=

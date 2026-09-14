@@ -270,6 +270,33 @@ These current workspace paths show the network boundary and its caller:
 | `backend/worker/tools/web_search.py` | Direct MCP client connection to the configured service URL |
 | `backend/worker/worker.py` | One-ticker worker processing that gives queue depth its meaning |
 
+## Run This Stage
+
+- **Repository tag:** `chapter-18-complete`.
+- **Azure resources:** a standalone MCP search Container App with internal HTTPS ingress and its own HTTP-based scale rule, on top of the Chapter 17 stack. Queue-depth scaling on the research worker is a configuration change to existing Container Apps, not a new resource. Provision with `./infra/deploy.sh infra/params/chapter-18.json` (`REGISTRY_LOGIN_SERVER` in `infra/.local-config` covers the new `mcpSearchImage` reference too — see [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-18-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../mcp-search && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** search now runs as its own service instead of a worker-owned subprocess. Start it separately and point the worker at it:
+
+  ```bash
+  cd backend/mcp-search
+  TAVILY_API_KEY=... uv run python search_server.py
+
+  cd backend/worker
+  uv run python worker.py
+  ```
+
+  The worker's default `MCP_SEARCH_URL` already points at `http://127.0.0.1:8811/mcp`, so no override is needed when both run on the same machine.
+
+  Scaling behavior itself (queue-depth and HTTP-concurrency rules) is only observable once both services are deployed to Container Apps with their scale rules configured, as described above.
+
 ## Next
 
 The distributed system now runs, explains its latency, and responds to a real burst. It still asks users to interpret flat output, loses operational context in support conversations, and hides partial failure. Chapter 19 turns those engineering capabilities into a coherent product surface and catches one last infrastructure regression while restoring the test scaling threshold.

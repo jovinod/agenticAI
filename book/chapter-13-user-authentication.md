@@ -152,6 +152,22 @@ No curated Chapter 13 tag exists. These current workspace paths show the complet
 | `backend/api/auth.py` | Entra token validation and the separate allow-list |
 | `backend/api/main.py` | Routes protected by `Depends(require_user)` |
 
+## Run This Stage
+
+The repository has since gained a `chapter-13-complete` tag, which matches this chapter's authentication boundary even though the "no curated tag" line above predates it.
+
+- **Repository tag:** `chapter-13-complete`.
+- **Azure resources:** a Microsoft Entra ID app registration and service principal, on top of the Chapter 9 stack. Register your own Entra ID app first, then set `ENTRA_CLIENT_ID`, `ENTRA_TENANT_ID`, `ALLOWED_USERS`, and `ALLOWED_ORIGIN` in `infra/.local-config` (see [Azure Setup and Deployment](azure-setup.md)) and provision with `./infra/deploy.sh infra/params/chapter-13.json`.
+- **Run it offline:** the API's auth tests exercise token validation without a live Entra tenant:
+
+  ```bash
+  git switch --detach chapter-13-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** register your own Entra ID app for sign-in and API access, set `ENTRA_CLIENT_ID`, `ENTRA_TENANT_ID`, and `ALLOWED_USERS` for the API, and add the frontend's MSAL configuration (`frontend/src/authConfig.js`). Then run the API, worker, and frontend as before; the browser now signs in and carries a token on each request.
+
 ## Next
 
 The user now proves who they are, but the API and workers still need identities when they call Service Bus, PostgreSQL, Redis, and Key Vault. Chapter 14 removes long-lived Azure service credentials where identity is supported and contains the third-party secret where it is not.

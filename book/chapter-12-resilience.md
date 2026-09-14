@@ -211,6 +211,23 @@ No curated Chapter 12 tag exists. These current workspace paths contain the comp
 | `backend/worker/worker.py` | Missing-row and redelivery guards, partial-result preservation, failed-job state, and acknowledgment handling |
 | `backend/worker/redis_client.py` | The same-day cache used before or around repeated research work |
 
+## Run This Stage
+
+The repository has since gained a `chapter-12-complete` tag, which matches the resilience behavior described here even though the "no curated tag" line above predates it.
+
+- **Repository tag:** `chapter-12-complete`.
+- **Azure resources:** none new; this chapter changes behavior across the resources already active through Chapter 9. Redeploy with `./infra/deploy.sh infra/params/chapter-12.json` to update the worker image (see [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:**
+
+  ```bash
+  git switch --detach chapter-12-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../embed-worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** same variables and process layout as Chapter 10. Retries and degraded-state handling are easiest to observe by disabling network access to one dependency (for example the model endpoint) mid-run and watching the worker's logs.
+
 ## Next
 
 The worker can now survive individual dependency and message failures, but the public API still accepts requests from anyone who can reach it. Chapter 13 adds human authentication and keeps authorization as a separate, explicit decision.

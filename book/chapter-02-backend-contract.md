@@ -242,6 +242,28 @@ Use the chapter tags to inspect the final artifacts or the complete change:
 
 After inspecting a snapshot, run `git switch -` to return to your previous branch.
 
+## Run This Stage
+
+- **Repository tag:** `chapter-02-complete`.
+- **Azure resources:** none. The API is a local FastAPI process with in-memory job state; no Dockerfile or Azure resource is active for it yet.
+- **Run it locally**, in two terminals:
+
+  ```bash
+  git switch --detach chapter-02-complete
+
+  # terminal 1
+  cd backend/api
+  uv sync
+  uv run uvicorn main:app --reload
+
+  # terminal 2
+  cd frontend
+  npm install
+  npm run dev
+  ```
+
+  Open the frontend's printed URL and submit a ticker. The browser now polls a real API instead of a mocked timer, and the job ID comes from the server.
+
 ## Next
 
 The browser and API now share a clear contract, but the API still performs the fake work and remembers jobs only in its own memory. That prevents independent processing, restart recovery, and horizontal scaling.

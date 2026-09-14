@@ -21,22 +21,22 @@
       "value": true
     },
     "apiImage": {
-      "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/api:chapter-13"
+      "value": "YOUR_REGISTRY.azurecr.io/api:chapter-13"
     },
     "workerImage": {
-      "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/worker:chapter-14"
+      "value": "YOUR_REGISTRY.azurecr.io/worker:chapter-14"
     },
     "allowedOrigin": {
-      "value": "https://nice-mushroom-08ede1e00.5.azurestaticapps.net"
+      "value": "https://YOUR_STATIC_WEB_APP_HOSTNAME"
     },
     "entraClientId": {
-      "value": "1eae0bf9-4998-4891-8ea9-d38639da5d31"
+      "value": "YOUR_ENTRA_CLIENT_ID"
     },
     "entraTenantId": {
-      "value": "cbfea054-fab5-4c73-b127-f814f3d0e6df"
+      "value": "YOUR_ENTRA_TENANT_ID"
     },
     "allowedUsers": {
-      "value": "josh.vinod@hotmail.com"
+      "value": "YOUR_ALLOWED_USERS@example.com"
     },
     "deployFoundryModel": {
       "value": true
@@ -60,10 +60,10 @@
       "value": true
     },
     "embedWorkerImage": {
-      "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/embed-worker:chapter-09"
+      "value": "YOUR_REGISTRY.azurecr.io/embed-worker:chapter-09"
     },
     "apimPublisherEmail": {
-      "value": "ivinodj@gmail.com"
+      "value": "YOUR_EMAIL@example.com"
     },
     "deployKeyVault": {
       "value": true

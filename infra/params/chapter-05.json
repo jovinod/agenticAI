@@ -8,7 +8,7 @@
     "deployServiceBus": { "value": true },
     "deployContainerRegistry": { "value": true },
     "deployContainerApps": { "value": true },
-    "apiImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/api:chapter-03" },
-    "workerImage": { "value": "stockresearchacr6zgqhh7zamq74.azurecr.io/worker:chapter-05" }
+    "apiImage": { "value": "YOUR_REGISTRY.azurecr.io/api:chapter-03" },
+    "workerImage": { "value": "YOUR_REGISTRY.azurecr.io/worker:chapter-05" }
   }
 }

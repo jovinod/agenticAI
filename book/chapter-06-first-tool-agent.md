@@ -269,6 +269,21 @@ The first agent has broad responsibilities across fundamentals, technical signal
 
 The turn cap bounds one failure mode; it does not make model output deterministic or correct.
 
+## Run This Stage
+
+- **Repository tag:** `chapter-06-complete`.
+- **Azure resources:** none new; still the Chapter 3 stack. This tag has no model-provider dependency yet, so it cannot be run as a live agent against a real model.
+- **Run it:** exercise the tool loop through its own test suite instead of the live app — it is the one place in the repository this stage's behavior is directly observable:
+
+  ```bash
+  git switch --detach chapter-06-complete
+  cd backend/worker
+  uv sync
+  uv run python -m unittest discover -s tests -v
+  ```
+
+  Chapter 7 wires a real model client so this loop can run end to end from a submitted ticker.
+
 ## Next
 
 Before one harness supports several specialized agents, provider-specific message behavior and capability registration need stable owners. Chapter 7 puts model transport behind one normalized client and turns reviewed skill folders into discoverable options while keeping mandatory work on direct application paths.

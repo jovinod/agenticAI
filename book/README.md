@@ -151,13 +151,11 @@ Until chapter tags are added, the labeled snippets are the source of truth for e
 
 ## Companion Material Still Needed
 
-The build path is explicit, but the repository still needs several companion files before every chapter becomes a clone-and-run exercise:
+The build path is explicit, and several companion pieces now exist: chapter start and completion tags for every chapter, offline unit tests per service, and parameterized infrastructure as code (`infra/`) covering Chapters 4 through 20. What still needs adding before every chapter is a full clone-and-run exercise:
 
-- Chapter start and completion tags.
 - Sanitized environment templates for each service.
-- Local PostgreSQL/pgvector and Redis orchestration.
+- Local PostgreSQL/pgvector and Redis orchestration for chapters that do not have a local-only path.
 - Versioned database migrations.
-- Parameterized infrastructure as code.
-- Offline unit tests and opt-in live integration tests.
+- Opt-in live integration tests.
 
 Chapters identify these boundaries rather than pretending the missing assets already exist.

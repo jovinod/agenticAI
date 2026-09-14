@@ -195,6 +195,21 @@ The companion repository marks the empty starting point and the finished fronten
 
 After inspecting a snapshot, run `git switch -` to return to your previous branch.
 
+## Run This Stage
+
+- **Repository tag:** `chapter-01-complete`.
+- **Azure resources:** none. The entire journey runs in the browser; Azure Static Web Apps is only needed if you want to host this build publicly, and [Azure Setup and Deployment](azure-setup.md) covers that when a later chapter requires it.
+- **Run it locally:**
+
+  ```bash
+  git switch --detach chapter-01-complete
+  cd frontend
+  npm install
+  npm run dev
+  ```
+
+  Open the printed local URL and submit a ticker. You should see the loading state and then a fabricated report with a job ID.
+
 ## Next
 
 The frontend now expresses the complete user journey, but it owns both the fake delay and the job ID. Nothing outside the current browser can accept or track the work.

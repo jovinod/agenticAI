@@ -231,6 +231,21 @@ No curated Chapter 10 tag exists, so the current workspace is the only code refe
 | `backend/worker/tools/hard_stops.py` | Threshold units, boundary comparisons, and missing-data behavior |
 | `backend/worker/worker.py` | Persistence, message redelivery guard, and structured decision output |
 
+## Run This Stage
+
+- **Repository tag:** `chapter-10-complete`.
+- **Azure resources:** none new; the Chapter 9 stack (Container Apps, PostgreSQL, Service Bus, Redis, and the APIM-fronted model). Redeploy with `./infra/deploy.sh infra/params/chapter-10.json` to update the worker image (see [Azure Setup and Deployment](azure-setup.md)).
+- **Run it offline:** API, worker, and embed-worker each pass their own test suite with no live model or cloud connection:
+
+  ```bash
+  git switch --detach chapter-10-complete
+  cd backend/api && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../worker && uv sync && uv run python -m unittest discover -s tests -v
+  cd ../embed-worker && uv sync && uv run python -m unittest discover -s tests -v
+  ```
+
+- **Run it end to end:** set the variables accumulated through Chapter 9 (`DATABASE_URL`, `SERVICEBUS_CONNECTION_STRING`, `REDIS_URL`, `TAVILY_API_KEY`, the `APIM_*` variables) and run the API, worker, and embed-worker as before. Each report now carries a structured Decision plus a read-only Devil's Advocate dissent.
+
 ## Next
 
 The decision graph now has explicit dissent and deterministic evidence, but a worker crash can still cause expensive completed stages to run again. Chapter 11 persists graph position at completed super-step boundaries and makes the resume guarantee precise.
