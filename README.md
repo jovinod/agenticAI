@@ -1,6 +1,12 @@
 # Stock Research Assistant
 
-This is the starting point for *Building Agentic AI Systems*. There is no
-application here yet — you will create it chapter by chapter.
+An agentic AI application that researches stocks: a frontend, a backend API,
+a queue-based worker, an embedding worker, and an MCP search service, deployed
+to Azure via the infra scripts.
 
-Start with Chapter 1: The Frontend Shell.
+- `frontend/` — the web UI
+- `backend/api` — the backend API
+- `backend/worker` — background job processing
+- `backend/embed-worker` — embedding generation
+- `backend/mcp-search` — MCP-based search tool
+- `infra/` — Azure deployment scripts (Bicep)
